@@ -273,3 +273,18 @@ scripts, pipes, redirections, globbing, aliases, batch files, `#!` scripts,
 nested shells, UTF-8 and the interactive line editor were exercised.
 Linux and macOS: compile cleanly for x86_64 and aarch64, not yet run.
 Windows 10 or newer is needed (the console must understand VT sequences).
+
+## License
+
+mmc is free software under the [MIT License](LICENSE).
+Copyright (c) 2026 Marjon Mangindo Cajocon.
+
+You may use, copy, change and share it, also commercially, as long as the
+copyright notice and the license text stay with it. It comes without warranty.
+
+Two things in this folder were made by others and keep their own license:
+
+| Part | By | License |
+|---|---|---|
+| `stb_truetype.h` | Sean Barrett | MIT or public domain, at your choice; the text is at the end of the file |
+| `Hack-*.ttf` | Source Foundry Authors, Bitstream Inc. | MIT and Bitstream Vera License, see `Hack-LICENSE.md`; the font may travel with a program, it may not be sold on its own |

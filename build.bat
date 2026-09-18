@@ -76,6 +76,7 @@ for %%F in ("%~2\*.exe.old*") do del "%%F" >nul 2>nul
 call :put mmc.exe "%~2\mmc.exe" || exit /b 1
 call :put mmc.exe "%~2\mmc-shell.exe" || exit /b 1
 call :put mmc-term.exe "%~2\mmc-term.exe" || exit /b 1
+copy /y LICENSE "%~2\LICENSE" >nul
 rem the Hack font travels with mmc: mmc-term looks in usr\share\fonts first
 if not exist "%~2\usr\share\fonts" mkdir "%~2\usr\share\fonts"
 for %%F in (Hack-Regular.ttf Hack-Bold.ttf Hack-Italic.ttf Hack-LICENSE.md) do copy /y %%F "%~2\usr\share\fonts\%%F" >nul

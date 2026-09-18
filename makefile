@@ -46,7 +46,7 @@ cross: $(SRC) $(TSRC) mmc.h mterm.h
 
 install: mmc mmc-term
 	mkdir -p $(PREFIX)/usr/share/fonts
-	cp mmc mmc-term $(PREFIX)/
+	cp mmc mmc-term LICENSE $(PREFIX)/
 	cp Hack-Regular.ttf Hack-Bold.ttf Hack-Italic.ttf Hack-LICENSE.md $(PREFIX)/usr/share/fonts/
 
 clean:
