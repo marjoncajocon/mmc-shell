@@ -98,7 +98,7 @@ static const char *const default_config =
   "# Remove the '#' in front of a line to change it.\n"
   "\n"
   "theme=dark                # dark or light (Ctrl+Shift+T switches)\n"
-  "#font=Consolas            # Cascadia Mono, Consolas, DejaVu Sans Mono ...\n"
+  "#font=Hack                # Hack (comes with mmc), Cascadia Mono, Consolas ...\n"
   "#font_file=/usr/share/fonts/MyFont.ttf   # or any .ttf file\n"
   "font_size=11\n"
   "cols=100\n"

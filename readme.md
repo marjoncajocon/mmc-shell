@@ -81,7 +81,8 @@ for x86_64 and aarch64, from any of the three systems.
 | `twin32.c` `tx11.c` `tcocoa.c` | one small window backend per system |
 | `mterm.rc` | Windows only: icon and version details of mmc-term |
 | `ttest.c` | tests of the terminal core, without a window |
-| `stb_truetype.h` | font rasterizer by Sean Barrett, public domain, the only file not written here |
+| `stb_truetype.h` | font rasterizer by Sean Barrett, public domain, the only code not written here |
+| `Hack-*.ttf`, `Hack-LICENSE.md` | the default font, [Hack](https://sourcefoundry.org/hack/) v3.003 (MIT / Bitstream Vera license); `install` copies it to `usr/share/fonts` |
 
 ## Install on Windows
 
@@ -136,8 +137,11 @@ start, every line is explained there): `theme`, `font`, `font_file`,
 `font_size`, `cols`, `rows`, `padding`, `titlebar`, `bold` (`no` draws bold
 text in the normal weight), `scrollback`, `cursor`, `cursor_blink`,
 `opacity`, `copy_on_select`, `shell`, and your own colors (`bg`, `fg`,
-`cursor_color`, `color0` … `color15`). Fonts placed in `/usr/share/fonts` of
-the mmc folder are found first, so a font can travel with mmc.
+`cursor_color`, `color0` … `color15`). The default font is **Hack**, which comes with mmc in `/usr/share/fonts` of
+the mmc folder; fonts in that folder are found first, so a font travels with
+mmc. Without it mmc-term takes Cascadia / Consolas (Windows), DejaVu Sans Mono
+(Linux) or Menlo (macOS). When you copy a program from `dist/` by hand, copy
+the three `Hack-*.ttf` files to `usr/share/fonts` too.
 
 How it is made: one shared core draws the *whole* terminal — text, box drawing
 characters, cursor, selection, scrollbar, even the menu — into a plain pixel

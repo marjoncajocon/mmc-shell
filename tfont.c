@@ -42,6 +42,7 @@ typedef struct Known {
 } Known;
 
 static const Known known[] = {
+  {"Hack", "Hack-Regular.ttf", "Hack-Bold.ttf", "Hack-Italic.ttf", 0, 0},
   {"Cascadia Mono", "CascadiaMono.ttf", NULL, NULL, 0, 0},
   {"Cascadia Code", "CascadiaCode.ttf", NULL, NULL, 0, 0},
   {"Consolas", "consola.ttf", "consolab.ttf", "consolai.ttf", 0, 0},
@@ -63,8 +64,10 @@ static const Known known[] = {
   {NULL, NULL, NULL, NULL, 0, 0}
 };
 
-/* looked at in this order when the config names no font */
+/* looked at in this order when the config names no font; Hack comes with
+** mmc (usr/share/fonts), the others are what each system has */
 static const char *const preferred[] = {
+  "Hack",
 #if defined(_WIN32)
   "Cascadia Mono", "Cascadia Code", "Consolas", "Lucida Console",
 #elif defined(__APPLE__)

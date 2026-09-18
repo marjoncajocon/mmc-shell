@@ -76,6 +76,9 @@ for %%F in ("%~2\*.exe.old*") do del "%%F" >nul 2>nul
 call :put mmc.exe "%~2\mmc.exe" || exit /b 1
 call :put mmc.exe "%~2\mmc-shell.exe" || exit /b 1
 call :put mmc-term.exe "%~2\mmc-term.exe" || exit /b 1
+rem the Hack font travels with mmc: mmc-term looks in usr\share\fonts first
+if not exist "%~2\usr\share\fonts" mkdir "%~2\usr\share\fonts"
+for %%F in (Hack-Regular.ttf Hack-Bold.ttf Hack-Italic.ttf Hack-LICENSE.md) do copy /y %%F "%~2\usr\share\fonts\%%F" >nul
 echo installed mmc.exe, mmc-shell.exe and mmc-term.exe in "%~2"
 echo add "%~2" to your PATH, then type: mmc-term  (the window)  or  mmc-shell
 exit /b 0
