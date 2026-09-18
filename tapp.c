@@ -75,8 +75,8 @@ static void apply_font (void) {
   float px = (float)(A.cfg.font_size + A.zoom) * A.scale * 96.0f / 72.0f;
   font_set_px(px);
   A.pad = (int)((float)A.cfg.padding * A.scale + 0.5f);
-  A.strip = (int)(3.0f * A.scale + 0.5f);
-  if (A.strip < 2) A.strip = 2;
+  A.strip = (int)(2.0f * A.scale + 0.5f);	/* the thin blue to green line */
+  if (A.strip < 1) A.strip = 1;
   A.head = 0;
   if (A.custom && !A.fullscreen) {
     A.head = (int)(30.0f * A.scale + 0.5f);
@@ -170,10 +170,21 @@ static void zoom (int delta) {
 ** ===================================================================
 */
 
+/* 'a' of 255 parts of color y over color x */
+static uint32_t blend (uint32_t x, uint32_t y, int a) {
+  uint32_t r = (((x >> 16) & 0xFF) * (uint32_t)(255 - a) + ((y >> 16) & 0xFF) * (uint32_t)a) / 255;
+  uint32_t g = (((x >> 8) & 0xFF) * (uint32_t)(255 - a) + ((y >> 8) & 0xFF) * (uint32_t)a) / 255;
+  uint32_t b = ((x & 0xFF) * (uint32_t)(255 - a) + (y & 0xFF) * (uint32_t)a) / 255;
+  return (r << 16) | (g << 8) | b;
+}
+
+
 static void set_theme (const char *name, int save) {
   strncpy(A.cfg.theme, name, sizeof(A.cfg.theme) - 1);
   theme_apply(&A.theme, theme_find(name), &A.cfg);
-  win_set_chrome(A.theme.bg, A.theme.accent1, A.theme.fg, A.theme.dark);
+  /* a quiet frame: the header color with only a hint of the logo blue */
+  win_set_chrome(A.theme.bg, blend(A.theme.ui, A.theme.accent1, A.theme.dark ? 70 : 110),
+                 A.theme.fg, A.theme.dark);
   if (save && A.conf != NULL) config_set_key(A.conf, "theme", A.cfg.theme);
   touch();
 }
@@ -780,6 +791,7 @@ static void build_scene (void) {
   s->focused = A.focused;
   s->blink_on = A.blink_on || !A.cfg.cursor_blink;
   s->cursor_style = A.cfg.cursor;
+  s->no_bold = A.cfg.no_bold;
   s->has_sel = A.has_sel;
   if (A.has_sel) sel_range(&s->sx0, &s->sy0, &s->sx1, &s->sy1);
   s->bar_alpha = (A.bar_drag || A.bar_hover) ? 230 :

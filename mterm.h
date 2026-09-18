@@ -160,6 +160,7 @@ typedef struct Config {
   int font_size, cols, rows, padding, scrollback;
   int cursor;	/* 0 block, 1 underline, 2 bar */
   int cursor_blink, opacity, copy_on_select;
+  int no_bold;	/* 1: bold text is drawn in the normal weight */
   int native_titlebar;	/* 1: let the system draw the title bar */
   int has_bg, has_fg, has_cursor;
   uint32_t bg, fg, cursor_color;
@@ -231,7 +232,7 @@ typedef struct Scene {	/* everything the renderer needs to know */
   int hot_button;	/* header button under the mouse: 0 hide, 1 zoom, 2 close */
   int maximized;
   int cw, ch, ascent;
-  int focused, blink_on, cursor_style;
+  int focused, blink_on, cursor_style, no_bold;
   int has_sel, sx0, sy0, sx1, sy1;	/* selection, y in grid_line() terms */
   int bar_alpha;	/* scrollbar 0..255 */
   const char *pill;	/* size hint while resizing, or NULL */

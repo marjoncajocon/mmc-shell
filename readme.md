@@ -133,7 +133,8 @@ On a Mac the Command key does it: Cmd+C, Cmd+V, Cmd+N, Cmd+T, Cmd +/-.
 
 Settings are in `/etc/mmcterm.conf` of the mmc folder (written on the first
 start, every line is explained there): `theme`, `font`, `font_file`,
-`font_size`, `cols`, `rows`, `padding`, `scrollback`, `cursor`, `cursor_blink`,
+`font_size`, `cols`, `rows`, `padding`, `titlebar`, `bold` (`no` draws bold
+text in the normal weight), `scrollback`, `cursor`, `cursor_blink`,
 `opacity`, `copy_on_select`, `shell`, and your own colors (`bg`, `fg`,
 `cursor_color`, `color0` … `color15`). Fonts placed in `/usr/share/fonts` of
 the mmc folder are found first, so a font can travel with mmc.

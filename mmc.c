@@ -236,7 +236,7 @@ static int prompt_is_classic (void) {
 
 static const char *prompt_last_line (void) {
   return prompt_is_classic() ? "\033[32m$\033[0m "
-                             : LINE "└──╼ \033[1;33m$\033[0m ";
+                             : LINE "└──╼ \033[0;33m$\033[0m ";
 }
 
 
@@ -258,14 +258,14 @@ static void show_prompt_header (void) {
   else buf_puts(&b, shown);
   fd_printf(1, "\033]0;MMC:%s\007\n", b.s);
   if (prompt_is_classic()) {	/* one line, like git-bash */
-    fd_printf(1, "\033[32m%s@%s \033[0;7;34m MMC \033[0;1m %s",
+    fd_printf(1, "\033[32m%s@%s \033[0;7;34m MMC \033[0m %s",
               user ? user : "", host ? host : "", b.s);
     if (branch) fd_printf(1, "\033[0;36m (%s)", branch);
   }
   else {	/* connector lines and brackets, like Parrot OS, in blue */
     fd_puts(1, LINE "┌─");
-    if (sh_status != 0) fd_puts(1, "[\033[1;31m✗" LINE "]─");
-    fd_printf(1, "[\033[1;92m%s\033[1;33m@\033[1;96m%s" LINE "]─[\033[1;94mMMC"
+    if (sh_status != 0) fd_puts(1, "[\033[0;31m✗" LINE "]─");
+    fd_printf(1, "[\033[0;92m%s\033[0;33m@\033[0;96m%s" LINE "]─[\033[0;94mMMC"
                  LINE "]─[\033[0;32m%s" LINE "]",
               user ? user : "", host ? host : "", b.s);
     if (branch) fd_printf(1, "─[\033[0;36m%s" LINE "]", branch);
@@ -317,19 +317,19 @@ static int has_truecolor (void) {
 
 
 static void banner_lines (Buf *b) {
-  static const char *const mark = "  \033[32m[\033[1;92m+\033[0;32m]\033[0m ";
+  static const char *const mark = "  \033[32m[\033[0;92m+\033[0;32m]\033[0m ";
   static const char *const sep = " \033[32m::\033[0m ";
   buf_puts(b, mark);
-  buf_puts(b, "\033[1;92m" MMC_NAME " " MMC_VERSION "\033[0m");
+  buf_puts(b, "\033[0;92m" MMC_NAME " " MMC_VERSION "\033[0m");
   buf_puts(b, sep);
   buf_puts(b, "\033[32mportable shell\033[0m\n");
   buf_puts(b, mark);
   buf_puts(b, "\033[32mdeveloped by\033[0m");
   buf_puts(b, sep);
-  buf_puts(b, "\033[1;92m" MMC_AUTHOR "\033[0m\n");
+  buf_puts(b, "\033[0;92m" MMC_AUTHOR "\033[0m\n");
   buf_puts(b, mark);
-  buf_puts(b, "\033[32mtype \033[1;92mhelp\033[0;32m for help, "
-              "\033[1;92mexit\033[0;32m to leave\033[0m\n");
+  buf_puts(b, "\033[32mtype \033[0;92mhelp\033[0;32m for help, "
+              "\033[0;92mexit\033[0;32m to leave\033[0m\n");
 }
 
 
@@ -361,7 +361,7 @@ static void show_banner (void) {
       if (truecolor)
         sprintf(esc, "\033[38;2;%d;%d;%dm", banner_rgb[row][0],
                 banner_rgb[row][1], banner_rgb[row][2]);
-      else strcpy(esc, row < 3 ? "\033[1;92m" : "\033[0;32m");
+      else strcpy(esc, row < 3 ? "\033[0;92m" : "\033[0;32m");
       buf_puts(&b, "  ");
       buf_puts(&b, esc);
       buf_puts(&b, banner_art[row]);

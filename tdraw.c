@@ -346,7 +346,8 @@ static void draw_cell (Frame *f, const Scene *s, const Cell *c, int px, int py,
     else if (c->ch >= 0x2580 && c->ch <= 0x259F)
       drawn = draw_block(f, c->ch, px, py, w, s->ch, fg);
     if (!drawn)
-      blit_glyph(f, font_glyph(c->ch, c->attr & A_BOLD, c->attr & A_ITALIC),
+      blit_glyph(f, font_glyph(c->ch, (c->attr & A_BOLD) && !s->no_bold,
+                                  c->attr & A_ITALIC),
                  px, py + s->ascent, fg, bg, px, px + w);
   }
   if (c->attr & A_UNDER) fill(f, px, py + s->ascent + line + 1, w, line, fg);
@@ -453,7 +454,7 @@ static void draw_menu (Frame *f, const Scene *s) {
 /* button i (0 hide, 1 zoom, 2 close), counted from the right edge */
 void draw_button_rect (const Frame *f, const Scene *s, int i, int *x, int *y,
                        int *w, int *h) {
-  int d = s->head * 13 / 30, gap = s->head * 24 / 30;
+  int d = s->head * 14 / 30, gap = s->head * 24 / 30;
   *w = *h = d;
   *y = (s->head - d) / 2;
   *x = f->w - s->head * 14 / 30 - d - (2 - i) * gap;
@@ -493,7 +494,8 @@ static void draw_logo (Frame *f, const Theme *t, int cx, int cy, int r) {
 
 
 static void draw_header (Frame *f, const Scene *s) {
-  static const uint32_t colors[3] = {0xFFD166, 0x22D36B, 0xFF5C7A};
+  /* amber, not pale yellow: the white sign has to show on it */
+  static const uint32_t colors[3] = {0xF29F2C, 0x22D36B, 0xFF5C7A};
   const Theme *t = s->t;
   uint32_t text = s->focused ? t->ui_text : mix(t->ui, t->ui_text, 120);
   int i, bx, by, bw, bh, tx, room;
@@ -521,18 +523,20 @@ static void draw_header (Frame *f, const Scene *s) {
       fill_round(f, bx - 3, by - 3, bw + 6, bh + 6, (bw + 6) / 2, c, 70);	/* glow */
     }
     fill_round(f, bx, by, bw, bh, bw / 2, c, 255);
-    m = bw * 3 / 10;	/* the sign inside, in the navy of the logo */
-    if (i == 0) fill(f, bx + m, by + bh / 2 - line / 2, bw - 2 * m, line, 0x0B1220);
+    m = (bw * 30 + 50) / 100;	/* the white sign, with air around it */
+    line = (bw - 2 * m + 3) / 6;	/* thin strokes keep small shapes clear */
+    if (line < 1) line = 1;
+    if (i == 0) fill(f, bx + m, by + bh / 2 - line / 2, bw - 2 * m, line, 0xFFFFFF);
     else if (i == 1) {
       int q = s->maximized ? m + 1 : m;
-      fill(f, bx + q, by + q, bw - 2 * q, line, 0x0B1220);
-      fill(f, bx + q, by + bh - q - line, bw - 2 * q, line, 0x0B1220);
-      fill(f, bx + q, by + q, line, bh - 2 * q, 0x0B1220);
-      fill(f, bx + bw - q - line, by + q, line, bh - 2 * q, 0x0B1220);
+      fill(f, bx + q, by + q, bw - 2 * q, line, 0xFFFFFF);
+      fill(f, bx + q, by + bh - q - line, bw - 2 * q, line, 0xFFFFFF);
+      fill(f, bx + q, by + q, line, bh - 2 * q, 0xFFFFFF);
+      fill(f, bx + bw - q - line, by + q, line, bh - 2 * q, 0xFFFFFF);
     }
     else {
-      stroke(f, bx + m, by + m, bx + bw - m - 1, by + bh - m - 1, line, 0x0B1220);
-      stroke(f, bx + bw - m - 1, by + m, bx + m, by + bh - m - 1, line, 0x0B1220);
+      stroke(f, bx + m, by + m, bx + bw - m - 1, by + bh - m - 1, line, 0xFFFFFF);
+      stroke(f, bx + bw - m - 1, by + m, bx + m, by + bh - m - 1, line, 0xFFFFFF);
     }
   }
 }

@@ -106,6 +106,7 @@ static const char *const default_config =
   "padding=4                 # space around the text, in pixels\n"
   "titlebar=custom           # custom: our own header; native: the system one\n"
   "scrollback=10000\n"
+  "bold=yes                  # no: bold text in the normal weight\n"
   "cursor=block              # block, underline or bar\n"
   "cursor_blink=yes\n"
   "opacity=100               # 30 .. 100\n"
@@ -175,6 +176,7 @@ static void config_set (Config *c, const char *key, const char *v) {
   else if (strcmp(key, "scrollback") == 0)
     c->scrollback = clamp(atoi(v), 0, 1000000);
   else if (strcmp(key, "opacity") == 0) c->opacity = clamp(atoi(v), 30, 100);
+  else if (strcmp(key, "bold") == 0) c->no_bold = !parse_bool(v);
   else if (strcmp(key, "titlebar") == 0)
     c->native_titlebar = (m_stricmp(v, "native") == 0);
   else if (strcmp(key, "cursor_blink") == 0) c->cursor_blink = parse_bool(v);
