@@ -1,0 +1,2 @@
+n=3 quiet=yes name=name OPTIND=4
+status: 0

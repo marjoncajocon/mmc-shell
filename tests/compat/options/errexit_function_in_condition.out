@@ -1,0 +1,5 @@
+after false in f
+f ok
+after false in f
+done
+status: 0

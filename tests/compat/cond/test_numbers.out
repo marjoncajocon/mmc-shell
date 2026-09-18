@@ -1,0 +1,4 @@
+1: ne lt le
+5: eq le ge
+10: ne gt ge
+status: 0

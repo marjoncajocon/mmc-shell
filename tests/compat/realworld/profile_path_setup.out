@@ -1,0 +1,4 @@
+/mingw64/bin:/usr/bin:/c/Windows
+/usr/bin:/opt/bin
+/clang64/bin:/usr/bin:/c/a:/c/b
+status: 0

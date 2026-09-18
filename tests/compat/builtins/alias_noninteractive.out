@@ -1,0 +1,4 @@
+not expanded
+alias-hi2
+alias hi='echo alias-hi'
+status: 0

@@ -44,6 +44,7 @@ build                 Windows: mmc.exe, mmc-shell.exe and mmc-term.exe
 build cross           every platform, into dist\
 build test            run the tests of the terminal core
 build install D:\mmc  copy the programs into a folder
+bash tests/run.sh     the bash compatibility tests (mmc tests/run.sh works too)
 build clean
 ```
 
@@ -55,16 +56,27 @@ make install PREFIX=~/mmc
 ```
 
 `build cross` makes Windows, Linux (static, musl) and macOS programs, each
-for x86_64 and aarch64, from any of the three systems.
+for x86_64 and aarch64, from any of the three systems, and `mmc-arm-linux`
+for older 32 bit phones. The static Linux programs are also the Android ones:
+they run in Termux and in `adb shell` as they are (`$TMPDIR` is used there,
+Android has no `/tmp`). mmc-term needs X11 or Cocoa, so Android gets the shell.
 
 | File | What is in it |
 |---|---|
 | `mmc.h` | the one shared header |
-| `mmc.c` | `main`, root folder, environment, prompt, read-run loop |
-| `mlex.c` | tokenizer: words, quotes, operators |
-| `mexpand.c` | `~`, `$VAR`, quotes, globbing (`* ? [a-z]`) |
-| `mexec.c` | aliases, `; && \|\| &`, pipelines, redirections, PATH lookup |
-| `mbuiltin.c` | builtin commands |
+| `mmc.c` | `main`, options, root folder, environment, prompt, read loop, `--check` |
+| `mparse.c` | lexer and parser: the bash grammar into a syntax tree |
+| `mexpand.c` | expansion: braces, `~`, `${...}`, `$( )`, `$(( ))`, splitting, quotes |
+| `mpattern.c` | patterns (`* ? [ ]`, extglob) and filename globbing (`**`) |
+| `marith.c` | arithmetic: `$(( ))`, `(( ))`, `let`, subscripts |
+| `mregex.c` | extended regular expressions for `[[ x =~ re ]]` |
+| `mvar.c` | variables: scopes, attributes, arrays, the environment |
+| `mexec.c` | running the tree: pipelines, subshells, redirections, functions, traps |
+| `mjobs.c` | background jobs; `jobs wait kill trap umask ...` |
+| `mbuiltin.c` | the builtin table, `cd pushd type command source ...`, aliases |
+| `mbvars.c` | `declare local export readonly unset set shopt shift getopts let` |
+| `mbio.c` | `echo printf read mapfile` |
+| `mbtest.c` | `test`, `[`, `[[ ]]` |
 | `mline.c` | line editor: history, Tab completion, UTF-8 |
 | `mpath.c` | Linux style paths on Windows (`/d/env` = `D:\env`) |
 | `mos.c` | everything that differs between Windows and Linux/macOS |
@@ -83,7 +95,8 @@ for x86_64 and aarch64, from any of the three systems.
 | `mterm.rc` | Windows only: icon and version details of mmc-term |
 | `ttest.c` | tests of the terminal core, without a window |
 | `stb_truetype.h` | font rasterizer by Sean Barrett, public domain, the only code not written here |
-| `Hack-*.ttf`, `Hack-LICENSE.md` | the default font, [Hack](https://sourcefoundry.org/hack/) v3.003 (MIT / Bitstream Vera license); `install` copies it to `usr/share/fonts` |
+| `HackNerdFontMono-*.ttf`, `HackNerdFont-LICENSE.md`, `HackNerdFont-README.md` | the default font: [Hack](https://sourcefoundry.org/hack/) v3.003 with the [Nerd Fonts](https://www.nerdfonts.com) v3.5.1 Powerline and icon glyphs (MIT / Bitstream Vera; the icon sets' licenses are in the README); `install` copies it to `usr/share/fonts` |
+| `tests/compat/` | 418 small bash scripts with what real bash printed for them; `tests/run.sh` compares mmc |
 
 ## Install on Windows
 
@@ -111,6 +124,8 @@ mmc-term                     the mmc shell, in the current folder
 mmc-term -e nvim notes.txt   another program instead of the shell
 mmc-term --hold -e ...       keep the window when the program ends
 mmc-term --theme light       dark or light, for this window only
+mmc-term --font-size 11      text size in points, for this window only
+mmc-term --render-test a.bmp draw a sample into an image, no window
 ```
 
 | Keys and mouse | |
@@ -139,11 +154,26 @@ start, every line is explained there): `theme`, `font`, `font_file`,
 `font_size`, `cols`, `rows`, `padding`, `titlebar`, `bold` (`no` draws bold
 text in the normal weight), `scrollback`, `cursor`, `cursor_blink`,
 `opacity`, `copy_on_select`, `shell`, and your own colors (`bg`, `fg`,
-`cursor_color`, `color0` … `color15`). The default font is **Hack**, which comes with mmc in `/usr/share/fonts` of
-the mmc folder; fonts in that folder are found first, so a font travels with
-mmc. Without it mmc-term takes Cascadia / Consolas (Windows), DejaVu Sans Mono
-(Linux) or Menlo (macOS). When you copy a program from `dist/` by hand, copy
-the three `Hack-*.ttf` files to `usr/share/fonts` too.
+`cursor_color`, `color0` … `color15`), `font_size` (points, 9 like git-bash)
+and `font_smoothing`.
+
+**Fonts.** The default font is **Hack** in its Nerd Font version, which comes
+with mmc in `/usr/share/fonts` of the mmc folder; fonts in that folder are
+found first, so a font travels with mmc. It has the Powerline symbols and the
+Nerd Font icons (git branch, folders, languages, systems), and it is also the
+fallback for icons when another font is chosen. Without it mmc-term takes
+Cascadia / Consolas (Windows), DejaVu Sans Mono (Linux) or Menlo (macOS). When
+you copy a program from `dist/` by hand, copy the `HackNerdFontMono-*.ttf`
+files to `usr/share/fonts` too.
+
+**Smooth text.** On Windows the letters are drawn by Windows itself (GDI),
+hinted to the pixel grid and ClearType filtered, like in every other Windows
+program - this is what makes git-bash's window sharp at small sizes, and
+mmc-term does the same (`font_smoothing=cleartype`, the default; `gray` is
+the same without the colored edges; `stb` is the built-in rasterizer that
+Linux and macOS use). Powerline arrows, rounds and slants (U+E0B0..E0BF), box
+drawing and block characters are drawn as geometry, so they fill their cells
+exactly and prompt segments join without seams at every size and zoom.
 
 How it is made: one shared core draws the *whole* terminal — text, box drawing
 characters, cursor, selection, scrollbar, even the menu — into a plain pixel
@@ -172,8 +202,8 @@ Not there (yet): tabs, re-wrapping text on resize, mouse reporting to programs
 ## Settings
 
 `/etc/profile` is read once when the shell starts; `~/.mmcrc` is read by every
-interactive shell. The syntax is a small bash-like subset:
-`export NAME=value`, `alias name='value'`, `source file`, `# comments`.
+interactive shell. Both are bash scripts: `export`, `alias`, `source`, `if`,
+functions, `$(command)` ... everything in "What the shell can do" works there.
 
 Example `/etc/profile` for a tools folder on the same drive as mmc
 (`$MMC_DRIVE` is the drive mmc is on, e.g. `/d`, so the file keeps working
@@ -208,8 +238,11 @@ lines, and a red `[✗]` after a command that failed:
 └──╼ $
 ```
 
-`export MMC_PROMPT=classic` in `/etc/profile` or `~/.mmcrc` gives the one
-line git-bash style prompt instead.
+`export MMC_PROMPT=...` in `/etc/profile` or `~/.mmcrc` changes it:
+`classic` is the one line git-bash style prompt, `powerline` draws colored
+segments with arrows and the git branch icon (it needs the Hack Nerd Font,
+which mmc-term has), and `ps1` uses your own `$PS1` with bash's `\u \h \w \$`
+escapes. A continued command line shows `$PS2` (`> `).
 
 **Banner.** An interactive shell greets with `MMC` in big green letters and
 the name of the developer. A file `/etc/banner` replaces the big letters with
@@ -217,7 +250,12 @@ your own drawing (plain text or ANSI colors, for example a picture converted
 to colored half blocks); an empty `/etc/banner` switches the banner off.
 
 Variables set by mmc: `HOME`, `USER`, `HOSTNAME`, `SHELL`, `MMC_ROOT`,
-`MMC_DRIVE` (Windows), `MMC_LEVEL`, and `PATH` starts with `/usr/bin:~/bin`.
+`MMC_DRIVE` (Windows), `MMC_LEVEL`, `MMC_VERSION`, and `PATH` starts with
+`/usr/bin:~/bin`; like bash also `BASH_VERSION` (scripts check it before they
+use bash features), `BASH_VERSINFO`, `OSTYPE` (`msys` on Windows, as in
+git-bash), `MACHTYPE`, `HOSTTYPE`, `PPID`, `UID`, `SHLVL`, `PWD`, `OLDPWD`,
+`RANDOM`, `SECONDS`, `LINENO`, `EPOCHSECONDS`, `PIPESTATUS`, `FUNCNAME`,
+`BASH_SOURCE`, `BASH_REMATCH`, `DIRSTACK`, `BASH_SUBSHELL`, `IFS`, `PS1`-`PS4`.
 
 ## Paths (Windows)
 
@@ -226,6 +264,7 @@ Variables set by mmc: `HOME`, `USER`, `HOSTNAME`, `SHELL`, `MMC_ROOT`,
 | `/` | the mmc folder |
 | `/home/me`, `~` | `<mmc folder>\home\me` |
 | `/d/env/zig` | `D:\env\zig` |
+| `/tmp` | the Windows temp folder (`%TEMP%`), the same as git-bash's |
 | `/dev/null` | `NUL` |
 
 Programs started by mmc are normal Windows programs. When one is started, the
@@ -233,6 +272,11 @@ arguments and environment values that look like Linux paths are turned back
 into Windows paths (`HOME`, `PATH`, `GOROOT=/d/env/...`, `--out=/tmp/x`), so
 git, node, go, VS Code ... all get what they expect. Switches such as `/c` or
 `/all` are left alone; write `//x` when you really need a literal `/x`.
+git-bash's own programs (`sed`, `grep`, `dirname` ... from PortableGit's
+`usr/bin`) read Linux paths themselves: for them only paths that exist in the
+mmc folder are converted, `/tmp` and `/c/...` go as they are, and `* ? [`
+arguments are quoted so they do not glob a second time. `/bin/rm` and
+`/usr/bin/env` find the program of that name in the PATH.
 Use forward slashes; a backslash only escapes shell characters (`\ `, `\*`),
 so `C:\Users\me` still works as it is.
 
@@ -241,27 +285,67 @@ settings are `$MMC_ROOT/etc/profile` and `$MMC_ROOT/home/<user>/.mmcrc`.
 
 ## What the shell can do
 
+mmc runs bash scripts. `tests/compat` has 418 cases taken from how the scripts
+on a developer PC really use bash (git, gradle, flutter, npm, emsdk, the
+Android SDK: see `tests/compat/RESEARCH.md`); mmc gives the same output and
+exit status as bash 5.3 for all of them.
+
 ```
-cmd | cmd      a && b     a || b     a ; b     cmd &
-> file   >> file   < file   2> file   2>> file   2>&1   >&2   &> file
-'text'   "text $VAR"   $VAR   ${VAR}   ${VAR:-default}   $?   $$   $1 $# $@
-~   *.c   file?.txt   [a-z]*   NAME=value   NAME=value command
-mmc -c 'command'      mmc script.mmc arg1 arg2      #!/usr/bin/env mmc
+a | b   a |& b   a && b   a || b   a ; b   a &   ! a   time a   ( a )   { a; }
+if/elif/else/fi   while/until   for x in ...   for ((i=0; i<n; i++))   case/esac
+select   f() { ...; }   function f { ...; }   return   break n   continue n
+[[ $a == x* && -f $f || $s =~ ^v([0-9]+) ]]   (( i++ ))   let   $(( 2**10 ))
+> >> < <> >| 2> 2>&1 >&2 &> &>> n>&m n<&- n>&m- <<EOF <<-EOF <<'EOF' <<<
+exec 3>file   {fd}>file   $(cmd)   `cmd`   $(< file)   <(cmd)   >(cmd)
+'x'  "x $v"  $'\n\t'  $"x"  \x   {a,b}{1..3}  {01..10..2}  ~  ~+  ~-
+$v ${v} ${v:-x} ${v:=x} ${v:?x} ${v:+x} ${#v} ${v#p} ${v##p} ${v%p} ${v%%p}
+${v/p/r} ${v//p/r} ${v/#p/r} ${v/%p/r} ${v:1:3} ${v^^} ${v,,} ${!v} ${!p*}
+${v@Q} ${v@U} ${v@A}   a=(1 2 3) a+=(4) a[i]=x ${a[@]} ${#a[@]} ${!a[@]}
+declare -A m=([k]=v)   declare -i -l -u -r -x -n -g   local   readonly
+* ? [a-z] [!x] [[:alpha:]] **  ?(x) *(x) +(x) @(x|y) !(x)   (shopt -s extglob)
+$? $$ $! $# $@ $* "$@" $- $0 $1 ${10} $_   IFS, set -euxo pipefail, trap
 ```
 
-Builtins: `cd` (`cd -`), `pwd`, `echo`, `export`, `unset`, `alias`, `unalias`,
-`source` / `.`, `which` / `type`, `history`, `help`, `exit`, `true`, `false`.
-Small fallbacks, used only when no real program with that name is in the PATH:
-`ls` (`-a -l`), `cat`, `clear`, `mkdir` (`-p`), `env`.
+Builtins (the same as bash's): `: . [ alias bg bind break builtin caller cd
+command compgen complete compopt continue declare dirs disown echo enable eval
+exec exit export false fc fg getopts hash help history jobs kill let local
+logout mapfile popd printf pushd pwd read readarray readonly return set shift
+shopt source suspend test times trap true type typeset ulimit umask unalias
+unset wait`. Small fallbacks, used only when no program with that name is in
+the PATH: `ls` (`-a -l`), `cat`, `clear`, `mkdir` (`-p`), `env`, `which`.
 
-Keys: Tab completes commands and files, Up/Down history, Left/Right,
-Ctrl-Left/Right by word, Home/End, Ctrl-A/E/K/U/W/L, Ctrl-C drops the line,
-Ctrl-D leaves. On Windows `.exe .com .cmd .bat` are found without typing the
-extension, and scripts starting with `#!` run with their interpreter.
+```
+mmc -c 'command' [$0 [$1 ...]]    mmc script.sh args    mmc -s < commands
+mmc -e -x -o pipefail ...         mmc -n script.sh      #!/usr/bin/env mmc
+mmc --check a.sh b.sh             syntax, and commands that are not there
+```
 
-Not there (yet): `if` / `for` / functions, `$(command)`, job control (`fg`,
-`bg`), and mmc is a shell, not a terminal window — it runs inside Windows
-Terminal, the classic console, or any Linux/macOS terminal.
+`mmc --check` reads scripts without running them and reports syntax errors
+and commands that are neither builtins, functions of the script, aliases nor
+programs in the PATH (with the PATH of `/etc/profile`), with their line.
+Scripts saved with Windows line ends (CR LF) are read like the others.
+
+How it works without `fork()` (Windows has none): `( )` and `$( )` run inside
+mmc on a copy of its state that is put back afterwards; in a pipeline programs
+run side by side, builtins in the middle run with their output kept and fed
+on, other shell code in the middle (loops, functions) runs in a child mmc
+that gets the variables, functions and options; `cmd &` does the same for
+shell code. Like bash, the last stage of a pipeline runs in a subshell unless
+`shopt -s lastpipe`. Everything is one code path on every system.
+
+Keys: Tab completes commands, functions and files, Up/Down history,
+Left/Right, Ctrl-Left/Right by word, Home/End, Ctrl-A/E/K/U/W/L, Ctrl-C drops
+the line (and stops a running loop), Ctrl-D leaves. An unfinished command
+(`if` without `fi`, an open quote, a `\` at the end) asks for more with `> `.
+Pasting several lines puts them into the line (shown as a return sign) and
+runs them together when you press Enter. On Windows `.exe .com .cmd .bat` are
+found without typing the extension, and scripts starting with `#!` run with
+their interpreter (`#!/bin/sh` and `#!/bin/bash` use mmc when there is no
+`sh` in the PATH).
+
+Not there (yet): `coproc`, stopping a program with Ctrl-Z (Windows has no
+such thing; `fg` waits for a background job), `fc` beyond `fc -l`, and
+history expansion with `!` (`!!`, `!$`).
 
 ## How git-bash does it
 
@@ -276,9 +360,12 @@ calls the Win32 API on Windows and the POSIX API on Linux/macOS (see `mos.c`).
 ## Tested
 
 Windows 11: builds with zero warnings (`-std=c11 -Wall -Wextra -pedantic`);
-scripts, pipes, redirections, globbing, aliases, batch files, `#!` scripts,
-nested shells, UTF-8 and the interactive line editor were exercised.
-Linux and macOS: compile cleanly for x86_64 and aarch64, not yet run.
+`tests/run.sh` passes all 418 bash compatibility cases, also when mmc runs
+the test script itself; `mmc --check` reads the 70 shell scripts of
+PortableGit, Flutter, emsdk and the Android SDK without a syntax error;
+`build test` passes the 111 checks of the terminal core.
+Linux, macOS and Android: compile cleanly (x86_64, aarch64, and arm for
+Android), not yet run.
 Windows 10 or newer is needed (the console must understand VT sequences).
 
 ## License
@@ -294,4 +381,4 @@ Two things in this folder were made by others and keep their own license:
 | Part | By | License |
 |---|---|---|
 | `stb_truetype.h` | Sean Barrett | MIT or public domain, at your choice; the text is at the end of the file |
-| `Hack-*.ttf` | Source Foundry Authors, Bitstream Inc. | MIT and Bitstream Vera License, see `Hack-LICENSE.md`; the font may travel with a program, it may not be sold on its own |
+| `HackNerdFontMono-*.ttf` | Source Foundry Authors, Bitstream Inc.; icons: the Nerd Fonts project and the icon set authors | MIT and Bitstream Vera License, see `HackNerdFont-LICENSE.md`; the icon sets' licenses are listed in `HackNerdFont-README.md`; the font may travel with a program, it may not be sold on its own |

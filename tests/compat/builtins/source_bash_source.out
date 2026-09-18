@@ -1,0 +1,3 @@
+sourced: inner.sh from source_bash_source.sh
+main: source_bash_source.sh
+status: 0

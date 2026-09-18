@@ -1,0 +1,6 @@
+if: keyword
+echo: builtin
+f: function
+cat: file
+no_such_thing_xyz: none
+status: 0

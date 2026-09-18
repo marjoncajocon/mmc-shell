@@ -1,0 +1,3 @@
+usage: usage_function.sh [-v] file...
+  -v   verbose
+status: 0

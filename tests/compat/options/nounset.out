@@ -1,0 +1,4 @@
+1 default  [0]
+status 1
+empty $@ ok: [] []
+status: 0

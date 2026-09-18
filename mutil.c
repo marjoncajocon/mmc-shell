@@ -89,6 +89,29 @@ void buf_puts (Buf *b, const char *s) {
 }
 
 
+void buf_printf (Buf *b, const char *fmt, ...) {
+  char small[256];
+  va_list ap;
+  int n;
+  va_start(ap, fmt);
+  n = vsnprintf(small, sizeof(small), fmt, ap);
+  va_end(ap);
+  if (n < 0) return;
+  if ((size_t)n < sizeof(small)) {
+    buf_putn(b, small, (size_t)n);
+    return;
+  }
+  {
+    char *big = (char *)xmalloc((size_t)n + 1);
+    va_start(ap, fmt);
+    vsnprintf(big, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    buf_putn(b, big, (size_t)n);
+    free(big);
+  }
+}
+
+
 /* hands the string to the caller (never NULL) and resets the buffer */
 char *buf_take (Buf *b) {
   char *s = b->s ? b->s : xstrdup("");
@@ -152,6 +175,12 @@ void vec_free (Vec *v) {
   for (i = 0; i < v->n; i++) free(v->v[i]);
   free(v->v);
   vec_init(v);
+}
+
+
+void vec_copy (Vec *dst, char *const *src, size_t n) {
+  size_t i;
+  for (i = 0; i < n; i++) vec_push(dst, xstrdup(src[i]));
 }
 
 /* }================================================================== */
@@ -234,6 +263,44 @@ size_t utf8_count (const char *s, size_t nbytes) {
 }
 
 
+/* bytes of the UTF-8 character at s (1 for a broken one) */
+int utf8_len (const char *s) {
+  unsigned char c = (unsigned char)*s;
+  int n = (c >= 0xF0) ? 4 : (c >= 0xE0) ? 3 : (c >= 0xC0) ? 2 : 1, i;
+  for (i = 1; i < n; i++)
+    if (((unsigned char)s[i] & 0xC0) != 0x80) return 1;
+  return n;
+}
+
+
+int is_name_n (const char *s, size_t n) {
+  size_t i;
+  if (n == 0 || !(isalpha((unsigned char)s[0]) || s[0] == '_')) return 0;
+  for (i = 1; i < n; i++)
+    if (!(isalnum((unsigned char)s[i]) || s[i] == '_')) return 0;
+  return 1;
+}
+
+
+int is_name (const char *s) {
+  return is_name_n(s, strlen(s));
+}
+
+
+/* the whole string is a decimal number (spaces around allowed) */
+int str_to_ll (const char *s, long long *out) {
+  unsigned long long v = 0;
+  int neg = 0, any = 0;
+  while (*s == ' ' || *s == '\t' || *s == '\n') s++;
+  if (*s == '+' || *s == '-') neg = (*s++ == '-');
+  for (; *s >= '0' && *s <= '9'; s++, any = 1) v = v * 10 + (unsigned long long)(*s - '0');
+  while (*s == ' ' || *s == '\t' || *s == '\n') s++;
+  if (!any || *s != '\0') return -1;
+  *out = neg ? (long long)(0ULL - v) : (long long)v;
+  return 0;
+}
+
+
 /* "%lld" is not portable to every C runtime; do it by hand */
 char *ll_to_str (long long v, char *out) {
   char tmp[24];
@@ -266,6 +333,18 @@ char *read_file (const char *native, size_t *len) {
   os_close(fd);
   if (len) *len = b.len;
   return buf_take(&b);
+}
+
+
+/* CR LF -> LF: scripts saved on Windows run like the others */
+void crlf_to_lf (char *s, size_t *len) {
+  size_t i, j = 0, n = len ? *len : strlen(s);
+  for (i = 0; i < n; i++) {
+    if (s[i] == '\r' && i + 1 < n && s[i + 1] == '\n') continue;
+    s[j++] = s[i];
+  }
+  s[j] = '\0';
+  if (len) *len = j;
 }
 
 

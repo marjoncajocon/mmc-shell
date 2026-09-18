@@ -5,6 +5,7 @@
 **   mmc-term -e prog [args...]   run another program instead
 **   mmc-term --hold ...          keep the window when the program ends
 **   mmc-term --theme light       dark or light, just for this window
+**   mmc-term --font-size 9       text size in points, just for this window
 */
 
 #include "mterm.h"
@@ -15,7 +16,9 @@
 
 static const char *const usage =
   TERM_NAME " " MMC_VERSION " - the terminal window of the mmc shell\n\n"
-  "usage: " TERM_NAME " [--theme dark|light] [--hold] [-e program [args...]]\n\n"
+  "usage: " TERM_NAME " [--theme dark|light] [--font-size N] [--hold]\n"
+  "       [-e program [args...]]\n"
+  "       " TERM_NAME " [--font-size N] --render-test out.bmp\n\n"
   "Settings: etc/mmcterm.conf in the mmc folder.\n"
   "Keys: Ctrl+Shift+C/V copy and paste, Ctrl+Shift+T theme, Ctrl + and - zoom,\n"
   "F11 full screen, Shift+PgUp/PgDn scroll, right click for the menu.";
@@ -31,6 +34,8 @@ int main (int argc, char **argv) {
     else if (strcmp(argv[i], "--theme") == 0 && i + 1 < argc) args.theme = argv[++i];
     else if (strcmp(argv[i], "--render-test") == 0 && i + 1 < argc)
       args.render_test = argv[++i];
+    else if (strcmp(argv[i], "--font-size") == 0 && i + 1 < argc)
+      args.font_size = atoi(argv[++i]);
     else if (strcmp(argv[i], "-e") == 0 && i + 1 < argc) {
       args.cmd = &argv[i + 1];	/* argv ends with NULL: so does this */
       break;

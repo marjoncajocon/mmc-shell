@@ -1,0 +1,3 @@
+in f: local
+after: global set-in-f
+status: 0

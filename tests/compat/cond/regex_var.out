@@ -1,0 +1,7 @@
+MINGW64_NT-10.0: windows (MINGW)
+Linux: other
+MSYS_NT: windows (MSYS)
+CYGWIN_NT: windows (CYGWIN)
+quoted part literal
+dot literal when quoted
+status: 0

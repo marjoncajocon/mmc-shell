@@ -1,0 +1,7 @@
+main.c: source
+lib.h: source
+README: capital
+Makefile: capital
+x.tar.gz: archive
+9lives: digit
+status: 0

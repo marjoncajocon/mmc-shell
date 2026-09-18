@@ -1,0 +1,8 @@
+[INFO] hello world
+[INFO] count=3
+[WARN] no x
+[INFO] hello tester
+[INFO] count=3
+[WARN] no x
+[INFO] cleanup
+status: 0

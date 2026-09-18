@@ -1,0 +1,8 @@
+errexit        	off
+nounset        	off
+pipefail       	on
+nullglob            	on
+shopt -s nullglob
+shopt -u extglob
+nullglob on
+status: 0

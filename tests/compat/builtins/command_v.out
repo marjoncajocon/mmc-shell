@@ -1,0 +1,5 @@
+echo
+f
+cat found
+status 1
+status: 0

@@ -1,0 +1,3 @@
+-Xmx64m
+-Dorg.appname=demo
+status: 0

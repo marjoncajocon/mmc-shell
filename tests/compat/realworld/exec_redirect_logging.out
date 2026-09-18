@@ -1,0 +1,6 @@
+to saved fd
+stderr line
+stdout line
+| a-err
+| b-out
+status: 0

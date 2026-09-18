@@ -1,0 +1,5 @@
+INFO  starting
+WARN  careful
+ERROR boom
+DEBUG now visible
+status: 0

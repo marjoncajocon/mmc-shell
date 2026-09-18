@@ -1,0 +1,3 @@
+all=12.34.5 major=12 minor=34 patch=5
+not a number
+status: 0

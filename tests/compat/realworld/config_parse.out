@@ -1,0 +1,5 @@
+name -> [demo app]
+port -> [8080]
+debug -> [true]
+path -> [/opt/app]
+status: 0

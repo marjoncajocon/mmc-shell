@@ -1,0 +1,11 @@
+flag a
+b=val
+flag c
+rest: file1 file2
+flag a
+flag c
+b=X
+rest: -notopt
+bad option
+rest: 
+status: 0

@@ -1,0 +1,3 @@
+*.none
+loop got [*.none]
+status: 0

@@ -259,11 +259,12 @@ void app_on_paste (const char *utf8) {
 
 static void new_window (void) {
   char *argv[2];
+  static const int fds[3] = {0, 1, 2};
   OsProc proc;
   long pid;
   argv[0] = A.exe;
   argv[1] = NULL;
-  if (os_spawn(A.exe, argv, 0, 1, 2, &proc, &pid) == 0) os_detach(proc);
+  if (os_spawn(A.exe, argv, NULL, fds, 3, &proc, &pid) == 0) os_detach(proc);
 }
 
 
@@ -870,6 +871,8 @@ int app_init (const AppArgs *args, const char *argv0) {
   config_save_default(A.conf);
   config_load(&A.cfg, A.conf);
   if (args->theme != NULL) strncpy(A.cfg.theme, args->theme, sizeof(A.cfg.theme) - 1);
+  if (args->font_size > 0)
+    A.cfg.font_size = args->font_size < 6 ? 6 : args->font_size > 72 ? 72 : args->font_size;
   A.custom = win_custom_chrome(!A.cfg.native_titlebar);
   A.hot_button = A.pressed_button = -1;
   strcpy(A.title, TERM_NAME);
@@ -978,10 +981,31 @@ int app_start (void) {
 /* draws a sample without any window: used to check the look */
 int app_render_test (const char *native) {
   static const char *const sample =
-    "\033[32mmmc-term\033[0m render test\r\n"
+    "\033[32mmmc-term\033[0m render test \033[2m(dim)\033[0m\r\n"
     "\033[7;34m MMC \033[0m \033[1mbold\033[0m \033[3mitalic\033[0m "
-    "\033[4munder\033[0m \033[31mred \033[33myellow \033[36mcyan\033[0m\r\n$ ";
+    "\033[1;3mbold italic\033[0m \033[4munder\033[0m \033[9mstrike\033[0m "
+    "\033[31mred \033[32mgreen \033[33myellow \033[34mblue \033[35mmagenta "
+    "\033[36mcyan\033[0m\r\n"
+    "The quick brown fox jumps over the lazy dog. 0O 1lI |{}[] => != -> ;:,.\r\n"
+    "int main (void) { return printf(\"%d\\n\", 42) == 3; }  // ~ ` ' \" @ # $ % ^ & *\r\n"
+    /* Powerline: a prompt with filled and thin arrows, rounds and slants */
+    "\033[30;42m marjon \033[32;44m\xee\x82\xb0\033[30m ~/w/mmc \033[34;45m\xee\x82\xb0"
+    "\033[30m \xee\x82\xa0 master \033[35;49m\xee\x82\xb0\033[0m "
+    "\xee\x82\xb1 \xee\x82\xb3 \033[36m\xee\x82\xb6\033[30;46mround\033[36;49m\xee\x82\xb4"
+    "\033[0m \033[33m\xee\x82\xba\033[30;43mslant\033[33;49m\xee\x82\xbc\033[0m "
+    "\xee\x82\xb8\xee\x82\xbe \xee\x82\xa1 \xee\x82\xa2\r\n"
+    /* Nerd icons: folder git linux windows apple terminal python, md file */
+    "\033[33m\xef\x81\xbb\033[0m folder  \033[31m\xef\x87\x93\033[0m git  "
+    "\xef\x85\xbc linux  \033[34m\xef\x85\xba\033[0m windows  \xef\x85\xb9 apple  "
+    "\033[32m\xef\x84\xa0\033[0m terminal  \033[33m\xee\x9c\xbc\033[0m python  "
+    "\xf3\xb0\x88\x94 file\r\n"
+    "\xe2\x94\x8c\xe2\x94\x80\xe2\x94\xac\xe2\x94\x80\xe2\x94\x90 "
+    "\xe2\x95\x94\xe2\x95\x90\xe2\x95\x97 \xe2\x96\x80\xe2\x96\x84\xe2\x96\x88"
+    "\xe2\x96\x91\xe2\x96\x92\xe2\x96\x93  \xce\xb1\xce\xb2\xce\xb3 \xc3\xa9\xc3\xa8"
+    " \xe2\x86\x92 \xe2\x9c\x93 \xe2\x9c\x97\r\n"
+    "\033[47;30m dark text on a light background \033[0m\r\n$ ";
   int w, h;
+  grid_resize(A.g, 86, 11);
   size_for(A.g->cols, A.g->rows, &w, &h);
   frame_resize(&A.frame, w, h);
   A.win_w = w;

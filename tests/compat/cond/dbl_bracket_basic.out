@@ -1,0 +1,6 @@
+no split
+empty ok
+&& inside
+|| inside
+! inside
+status: 0

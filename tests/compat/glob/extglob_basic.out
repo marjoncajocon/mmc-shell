@@ -1,0 +1,5 @@
+a.h lib.so main.o readme
+a.c a.h b.c
+a.c b.c
+lib.so
+status: 0

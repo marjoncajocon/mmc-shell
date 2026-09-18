@@ -1,0 +1,6 @@
+usage: die_usage.sh <cmd>
+status 64
+ran ok
+status 0
+status 1
+status: 0

@@ -1,0 +1,7 @@
+item a
+item b
+item c
+count 2
+grep miss handled
+fallback
+status: 1

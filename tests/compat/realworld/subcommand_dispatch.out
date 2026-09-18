@@ -1,0 +1,9 @@
+building lib
+cleaning
+commands:
+  build
+  clean
+  help
+unknown command: deploy
+status 1
+status: 0

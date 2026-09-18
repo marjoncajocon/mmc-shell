@@ -1,0 +1,4 @@
+in: inner
+out: tmpdir
+unchanged
+status: 0

@@ -1,0 +1,5 @@
+declare -- s="a \"q\" b"
+declare -i n="5"
+declare -x E="x"
+status 1
+status: 0

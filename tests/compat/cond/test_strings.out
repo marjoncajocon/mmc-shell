@@ -1,0 +1,7 @@
+eq
+ne
+e empty
+a nonempty
+test builtin
+== works in bash [
+status: 0

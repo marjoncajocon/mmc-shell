@@ -1,0 +1,4 @@
+build: yes
+test: no
+cmd_build
+status: 0

@@ -1,0 +1,6 @@
+n=3 first=a all=a b c d
+args.sh
+n=0 first= all=
+args.sh
+after: outer
+status: 0

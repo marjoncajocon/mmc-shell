@@ -1,0 +1,6 @@
+main.test.js | main.test.js
+/home/user/src/project | /home/user/src/project
+stem=main ext=js base=main.test
+main.test
+. / a
+status: 0

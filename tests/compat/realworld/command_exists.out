@@ -1,0 +1,5 @@
+have: sort
+missing: no_such_tool_abc
+missing count: 2
+hash says missing
+status: 0

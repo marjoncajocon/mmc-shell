@@ -1,0 +1,5 @@
+dir name: realworld
+script found in its dir
+absolute
+dirname of $0: .
+status: 0

@@ -1,0 +1,4 @@
+Hello, $name! $(echo no) `no` \n
+$name
+$name too
+status: 0

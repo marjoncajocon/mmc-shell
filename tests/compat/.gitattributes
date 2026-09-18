@@ -1,0 +1,2 @@
+# Cases and expected outputs must stay byte-exact (LF, no conversion).
+* -text

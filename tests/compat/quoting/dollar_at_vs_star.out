@@ -1,0 +1,11 @@
+1<a b>
+1<c>
+1<d  e>
+2<a b c d  e>
+3<a>
+3<b>
+3<c>
+3<d>
+3<e>
+4<a b,c,d  e>
+status: 0

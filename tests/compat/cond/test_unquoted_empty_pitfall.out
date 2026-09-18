@@ -1,0 +1,4 @@
+-n with unquoted empty is TRUE
+quoted is false
+status 2
+status: 0

@@ -156,6 +156,21 @@ static int brightness (uint32_t c) {
 }
 
 
+/* is this dark text on a light background? (the font asks, see tfont.c) */
+static int dark_text (uint32_t fg, uint32_t bg) {
+  return brightness(fg) < brightness(bg);
+}
+
+
+/* ClearType: every color channel has its own coverage */
+static uint32_t mix3 (uint32_t bg, uint32_t fg, int ar, int ag, int ab) {
+  uint32_t r = (((bg >> 16) & 0xFF) * (uint32_t)(255 - ar) + ((fg >> 16) & 0xFF) * (uint32_t)ar) / 255;
+  uint32_t g = (((bg >> 8) & 0xFF) * (uint32_t)(255 - ag) + ((fg >> 8) & 0xFF) * (uint32_t)ag) / 255;
+  uint32_t b = ((bg & 0xFF) * (uint32_t)(255 - ab) + (fg & 0xFF) * (uint32_t)ab) / 255;
+  return (r << 16) | (g << 8) | b;
+}
+
+
 static void blit_glyph (Frame *f, const Glyph *g, int x, int y, uint32_t fg,
                         uint32_t bg, int clip_x0, int clip_x1) {
   const unsigned char *lut;
@@ -163,16 +178,23 @@ static void blit_glyph (Frame *f, const Glyph *g, int x, int y, uint32_t fg,
   if (g == NULL || g->bm == NULL) return;
   if (!lut_ready) make_luts();
   lut = (brightness(fg) > brightness(bg)) ? lut_light : lut_dark;
+  if (clip_x0 < 0) clip_x0 = 0;
+  if (clip_x1 > f->w) clip_x1 = f->w;
   for (j = 0; j < g->h; j++) {
     int py = y + g->yoff + j;
     if (py < 0 || py >= f->h) continue;
     for (i = 0; i < g->w; i++) {
       int px = x + g->xoff + i;
-      int a = g->bm[(size_t)j * (size_t)g->w + (size_t)i];
+      size_t at = (size_t)j * (size_t)g->w + (size_t)i;
       uint32_t *p;
-      if (a == 0 || px < clip_x0 || px >= clip_x1 || px < 0 || px >= f->w) continue;
+      if (px < clip_x0 || px >= clip_x1) continue;
       p = &f->px[(size_t)py * (size_t)f->w + (size_t)px];
-      *p = mix(*p, fg, lut[a]);
+      if (g->lcd == 1) {	/* ClearType: already tuned by the system */
+        const unsigned char *c = g->bm + at * 3;
+        if ((c[0] | c[1] | c[2]) != 0) *p = mix3(*p, fg, c[0], c[1], c[2]);
+      }
+      else if (g->bm[at] != 0)	/* the system's gray is tuned too */
+        *p = mix(*p, fg, g->lcd == 2 ? g->bm[at] : lut[g->bm[at]]);
     }
   }
 }
@@ -201,7 +223,8 @@ static void draw_text (Frame *f, int x, int y, const char *utf8, uint32_t fg,
                        uint32_t bg, int bold) {
   while (*utf8) {
     uint32_t cp = next_cp(&utf8);
-    blit_glyph(f, font_glyph(cp, bold, 0), x, y + font_ascent(), fg, bg, 0, f->w);
+    blit_glyph(f, font_glyph(cp, bold, 0, dark_text(fg, bg)), x, y + font_ascent(),
+               fg, bg, 0, f->w);
     x += font_cell_w() * grid_wcwidth(cp);
   }
 }
@@ -320,6 +343,91 @@ static int draw_block (Frame *f, uint32_t cp, int x, int y, int w, int h,
 
 /*
 ** {==================================================================
+** Powerline separators (U+E0B0..E0BF) as geometry: they fill their cell
+** exactly, so the colored segments of a prompt join without seams at
+** every size and zoom. 4 x 4 samples per pixel give smooth edges.
+** ===================================================================
+*/
+
+static double seg_dist (double px, double py, double ax, double ay,
+                        double bx, double by) {
+  double dx = bx - ax, dy = by - ay;
+  double t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy);
+  if (t < 0.0) t = 0.0;
+  else if (t > 1.0) t = 1.0;
+  dx = ax + t * dx - px;
+  dy = ay + t * dy - py;
+  return sqrt(dx * dx + dy * dy);
+}
+
+
+/* inside the half ellipse centered on (cx, m), radii rx, ry? */
+static int in_ellipse (double x, double y, double cx, double m, double rx,
+                       double ry) {
+  double a, b;
+  if (rx <= 0.0 || ry <= 0.0) return 0;
+  a = (x - cx) / rx;
+  b = (y - m) / ry;
+  return a * a + b * b <= 1.0;
+}
+
+
+/* is the point (x, y) of a w x h cell inside the shape? t: line width */
+static int pl_inside (uint32_t cp, double x, double y, double w, double h,
+                      double t) {
+  double m = h / 2.0, u = x / w, v = y / h, r = t / 2.0;
+  switch (cp) {
+    case 0xE0B0: return u <= 1.0 - fabs(2.0 * v - 1.0);	/* solid right arrow */
+    case 0xE0B2: return u >= fabs(2.0 * v - 1.0);	/* solid left arrow */
+    case 0xE0B1:	/* thin right arrow */
+      return seg_dist(x, y, 0, 0, w, m) <= r || seg_dist(x, y, w, m, 0, h) <= r;
+    case 0xE0B3:	/* thin left arrow */
+      return seg_dist(x, y, w, 0, 0, m) <= r || seg_dist(x, y, 0, m, w, h) <= r;
+    case 0xE0B4: return in_ellipse(x, y, 0, m, w, m);	/* solid right round */
+    case 0xE0B6: return in_ellipse(x, y, w, m, w, m);	/* solid left round */
+    case 0xE0B5:	/* thin right round */
+      return in_ellipse(x, y, 0, m, w, m) && !in_ellipse(x, y, 0, m, w - t, m - t);
+    case 0xE0B7:	/* thin left round */
+      return in_ellipse(x, y, w, m, w, m) && !in_ellipse(x, y, w, m, w - t, m - t);
+    case 0xE0B8: return u <= v;	/* lower left triangle */
+    case 0xE0BA: return u >= 1.0 - v;	/* lower right triangle */
+    case 0xE0BC: return u <= 1.0 - v;	/* upper left triangle */
+    case 0xE0BE: return u >= v;	/* upper right triangle */
+    case 0xE0B9: case 0xE0BF: return seg_dist(x, y, 0, 0, w, h) <= r;	/* \ */
+    case 0xE0BB: case 0xE0BD: return seg_dist(x, y, w, 0, 0, h) <= r;	/* / */
+  }
+  return 0;
+}
+
+
+static int draw_powerline (Frame *f, uint32_t cp, int x, int y, int w, int h,
+                           uint32_t fg) {
+  double t = (double)h / 14.0;
+  int i, j, si, sj;
+  if (t < 1.0) t = 1.0;
+  for (j = 0; j < h; j++) {
+    if (y + j < 0 || y + j >= f->h) continue;
+    for (i = 0; i < w; i++) {
+      int n = 0;
+      uint32_t *p;
+      if (x + i < 0 || x + i >= f->w) continue;
+      for (sj = 0; sj < 4; sj++)
+        for (si = 0; si < 4; si++)
+          n += pl_inside(cp, (double)i + (si + 0.5) / 4.0, (double)j + (sj + 0.5) / 4.0,
+                         (double)w, (double)h, t);
+      if (n == 0) continue;
+      p = &f->px[(size_t)(y + j) * (size_t)f->w + (size_t)(x + i)];
+      *p = mix(*p, fg, n * 255 / 16);
+    }
+  }
+  return 1;
+}
+
+/* }================================================================== */
+
+
+/*
+** {==================================================================
 ** The terminal
 ** ===================================================================
 */
@@ -333,25 +441,37 @@ static int in_selection (const Scene *s, int x, int y) {
 }
 
 
-static void draw_cell (Frame *f, const Scene *s, const Cell *c, int px, int py,
-                       uint32_t fg, uint32_t bg) {
+/* the text of a cell; a glyph may reach out to [clip0, clip1) - italics
+** and the colored ClearType edges need that */
+static void draw_cell_fg (Frame *f, const Scene *s, const Cell *c, int px,
+                          int py, uint32_t fg, uint32_t bg, int clip0,
+                          int clip1) {
   int w = s->cw * ((c->attr & A_WIDE) ? 2 : 1);
   int line = (s->ch + 8) / 16;
   if (line < 1) line = 1;
-  fill(f, px, py, w, s->ch, bg);
   if (c->ch > ' ' && !(c->attr & A_HIDDEN)) {
     int drawn = 0;
     if (c->ch >= 0x2500 && c->ch <= 0x257F)
       drawn = draw_box(f, c->ch, px, py, w, s->ch, fg);
     else if (c->ch >= 0x2580 && c->ch <= 0x259F)
       drawn = draw_block(f, c->ch, px, py, w, s->ch, fg);
+    else if (c->ch >= 0xE0B0 && c->ch <= 0xE0BF)
+      drawn = draw_powerline(f, c->ch, px, py, w, s->ch, fg);
     if (!drawn)
       blit_glyph(f, font_glyph(c->ch, (c->attr & A_BOLD) && !s->no_bold,
-                                  c->attr & A_ITALIC),
-                 px, py + s->ascent, fg, bg, px, px + w);
+                               c->attr & A_ITALIC, dark_text(fg, bg)),
+                 px, py + s->ascent, fg, bg, clip0, clip1);
   }
   if (c->attr & A_UNDER) fill(f, px, py + s->ascent + line + 1, w, line, fg);
   if (c->attr & A_STRIKE) fill(f, px, py + (s->ascent * 2) / 3, w, line, fg);
+}
+
+
+static void draw_cell (Frame *f, const Scene *s, const Cell *c, int px, int py,
+                       uint32_t fg, uint32_t bg) {
+  int w = s->cw * ((c->attr & A_WIDE) ? 2 : 1);
+  fill(f, px, py, w, s->ch, bg);
+  draw_cell_fg(f, s, c, px, py, fg, bg, px, px + w);
 }
 
 
@@ -509,8 +629,8 @@ static void draw_header (Frame *f, const Scene *s) {
     uint32_t cp = next_cp(&p);
     int wide = grid_wcwidth(cp);
     if (wide > room) break;
-    blit_glyph(f, font_glyph(cp, 0, 0), tx, (s->head - s->ch) / 2 + s->ascent,
-               text, t->ui, 0, f->w);
+    blit_glyph(f, font_glyph(cp, 0, 0, dark_text(text, t->ui)), tx,
+               (s->head - s->ch) / 2 + s->ascent, text, t->ui, 0, f->w);
     tx += wide * s->cw;
     room -= wide;
   }
@@ -559,16 +679,26 @@ void draw_scene (Frame *f, const Scene *s) {
     int y = row - g->view;	/* in grid_line() terms, for the selection */
     int py = s->head + s->strip + s->pad + row * s->ch;
     if (l == NULL) continue;
+    /* backgrounds first, then the text: a glyph may lean into the next
+    ** cell (italics, ClearType edges) without being painted over */
     for (x = 0; x < g->cols && x < l->n; x++) {
       const Cell *c = &l->c[x];
       uint32_t fg, bg;
       int sel = in_selection(s, x, y);
       if (c->attr & A_WCONT) continue;
-      if (c->ch <= ' ' && c->bg == COL_DEFAULT && !sel &&
-          !(c->attr & (A_REVERSE | A_UNDER | A_STRIKE)))
-        continue;	/* plain background: already there */
+      if (c->bg == COL_DEFAULT && !sel && !(c->attr & A_REVERSE)) continue;
       cell_colors(s, c, sel, &fg, &bg);
-      draw_cell(f, s, c, s->pad + x * s->cw, py, fg, bg);
+      fill(f, s->pad + x * s->cw, py, s->cw * ((c->attr & A_WIDE) ? 2 : 1), s->ch, bg);
+    }
+    for (x = 0; x < g->cols && x < l->n; x++) {
+      const Cell *c = &l->c[x];
+      uint32_t fg, bg;
+      int sel = in_selection(s, x, y), px = s->pad + x * s->cw;
+      if (c->attr & A_WCONT) continue;
+      if (c->ch <= ' ' && !(c->attr & (A_UNDER | A_STRIKE))) continue;
+      cell_colors(s, c, sel, &fg, &bg);
+      draw_cell_fg(f, s, c, px, py, fg, bg, px - s->cw / 2,
+                   px + s->cw * ((c->attr & A_WIDE) ? 2 : 1) + s->cw / 2);
     }
   }
   draw_cursor(f, s);

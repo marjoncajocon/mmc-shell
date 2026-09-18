@@ -162,6 +162,7 @@ typedef struct Config {
   int cursor_blink, opacity, copy_on_select;
   int no_bold;	/* 1: bold text is drawn in the normal weight */
   int native_titlebar;	/* 1: let the system draw the title bar */
+  int smoothing;	/* SMOOTH_*: how glyphs are rasterized */
   int has_bg, has_fg, has_cursor;
   uint32_t bg, fg, cursor_color;
   int has_pal[16];
@@ -186,9 +187,21 @@ double theme_contrast (uint32_t a, uint32_t b);
 ** ===================================================================
 */
 
+/*
+** font_smoothing in mmcterm.conf. ClearType and gray use the system
+** rasterizer (Windows: GDI, hinted like every other Windows program, and
+** what git-bash's mintty shows); stb is the built-in stb_truetype one,
+** the only one on Linux and macOS.
+*/
+#define SMOOTH_CLEARTYPE	0
+#define SMOOTH_GRAY		1
+#define SMOOTH_STB		2
+
 typedef struct Glyph {
   int w, h, xoff, yoff;	/* yoff from the baseline, up is negative */
-  unsigned char *bm;	/* w*h coverage, NULL if empty */
+  int lcd;	/* 0: stb_truetype coverage, 1: R, G, B coverage per pixel
+		   (ClearType), 2: gray from the system rasterizer */
+  unsigned char *bm;	/* w*h coverage (w*h*3 when lcd is 1), NULL if empty */
 } Glyph;
 
 void font_add_dir (const char *native);	/* fonts carried with mmc */
@@ -198,7 +211,9 @@ int font_cell_w (void);
 int font_cell_h (void);
 int font_ascent (void);
 const char *font_name (void);
-const Glyph *font_glyph (uint32_t cp, int bold, int italic);
+/* 'dark': dark text on a light background (the system rasterizer
+** tunes its coverage for the colors it draws with) */
+const Glyph *font_glyph (uint32_t cp, int bold, int italic, int dark);
 
 /* }================================================================== */
 
@@ -293,6 +308,7 @@ typedef struct AppArgs {
   int hold;	/* --hold */
   char **cmd;	/* -e prog args..., or NULL */
   const char *render_test;	/* --render-test file.bmp */
+  int font_size;	/* --font-size N, 0 = from the config */
 } AppArgs;
 
 int app_init (const AppArgs *args, const char *argv0);

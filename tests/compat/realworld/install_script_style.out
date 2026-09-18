@@ -1,0 +1,6 @@
+tool-install: download tool-linux-x64.tar.gz to /usr/local/lib/tool
+tool-install: download tool-darwin-arm64.tar.gz to /usr/local/lib/tool
+tool-install: download tool-windows-x64.tar.gz to /usr/local/lib/tool
+tool-install: unsupported SunOS/sparc
+tool-install: would ask for confirmation
+status: 0

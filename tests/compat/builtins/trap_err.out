@@ -1,0 +1,5 @@
+ERR trap: status 1
+continue
+ERR trap: status 2
+end
+status: 0

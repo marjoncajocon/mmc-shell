@@ -1,0 +1,7 @@
+123: number
+12a: not number
+: not number
+007: number
+[trim me]
+compressed
+status: 0

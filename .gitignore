@@ -24,3 +24,7 @@
 *~
 .DS_Store
 Thumbs.db
+
+# test results and the ready-to-copy folder
+/tests/failed.txt
+/release/

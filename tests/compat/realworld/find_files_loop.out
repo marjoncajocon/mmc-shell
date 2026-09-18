@@ -1,0 +1,5 @@
+a.c: // a.c
+b c.c: // b c.c
+2 C files
+skipped non-match
+status: 0

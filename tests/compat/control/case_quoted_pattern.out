@@ -1,0 +1,5 @@
+a.txt no-literal
+a.txt glob
+*.txt literal
+*.txt glob
+status: 0

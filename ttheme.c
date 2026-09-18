@@ -98,9 +98,11 @@ static const char *const default_config =
   "# Remove the '#' in front of a line to change it.\n"
   "\n"
   "theme=dark                # dark or light (Ctrl+Shift+T switches)\n"
-  "#font=Hack                # Hack (comes with mmc), Cascadia Mono, Consolas ...\n"
+  "#font=Hack                # Hack (Hack Nerd Font Mono, comes with mmc: has the\n"
+  "                          # Powerline and Nerd icons), Cascadia Mono, Consolas ...\n"
   "#font_file=/usr/share/fonts/MyFont.ttf   # or any .ttf file\n"
-  "font_size=11\n"
+  "font_size=9               # points, like git-bash (Ctrl + and - zoom)\n"
+  "font_smoothing=cleartype  # cleartype, gray or stb (Windows; others use stb)\n"
   "cols=100\n"
   "rows=30\n"
   "padding=4                 # space around the text, in pixels\n"
@@ -123,7 +125,12 @@ static const char *const default_config =
 void config_defaults (Config *c) {
   memset(c, 0, sizeof(*c));
   strcpy(c->theme, "dark");
-  c->font_size = 11;
+  c->font_size = 9;
+#ifdef _WIN32
+  c->smoothing = SMOOTH_CLEARTYPE;
+#else
+  c->smoothing = SMOOTH_STB;
+#endif
   c->cols = 100;
   c->rows = 30;
   c->padding = 4;
@@ -170,6 +177,10 @@ static void config_set (Config *c, const char *key, const char *v) {
     copy_text(c->font_file, sizeof(c->font_file), v);
   else if (strcmp(key, "shell") == 0) copy_text(c->shell, sizeof(c->shell), v);
   else if (strcmp(key, "font_size") == 0) c->font_size = clamp(atoi(v), 6, 72);
+  else if (strcmp(key, "font_smoothing") == 0)
+    c->smoothing = (m_stricmp(v, "gray") == 0 || m_stricmp(v, "grey") == 0)
+                     ? SMOOTH_GRAY
+                   : (m_stricmp(v, "stb") == 0) ? SMOOTH_STB : SMOOTH_CLEARTYPE;
   else if (strcmp(key, "cols") == 0) c->cols = clamp(atoi(v), 20, 500);
   else if (strcmp(key, "rows") == 0) c->rows = clamp(atoi(v), 5, 200);
   else if (strcmp(key, "padding") == 0) c->padding = clamp(atoi(v), 0, 64);

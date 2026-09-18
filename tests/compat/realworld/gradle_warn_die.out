@@ -1,0 +1,3 @@
+MAX_FD=4096
+die status 1
+status: 0

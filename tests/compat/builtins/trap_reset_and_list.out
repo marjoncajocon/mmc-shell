@@ -1,0 +1,3 @@
+trap -- 'echo bye' EXIT
+no trap left
+status: 0

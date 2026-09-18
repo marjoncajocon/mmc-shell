@@ -1,0 +1,6 @@
+loop: first
+leftover: [last-no-newline]
+got a
+got b
+status 1
+status: 0

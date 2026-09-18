@@ -19,8 +19,10 @@ set ZIG=zig
 where zig >nul 2>nul || set ZIG=D:\env\zig\zig.exe
 
 set CFLAGS=-std=c11 -O2 -s -Wall -Wextra -pedantic
+rem the default font: Hack with the Powerline and Nerd Font icons
+set FONTS=HackNerdFontMono-Regular.ttf HackNerdFontMono-Bold.ttf HackNerdFontMono-Italic.ttf HackNerdFontMono-BoldItalic.ttf HackNerdFont-LICENSE.md HackNerdFont-README.md
 set BASE=mutil.c mpath.c mos.c
-set SRC=mmc.c mlex.c mexpand.c mexec.c mbuiltin.c mline.c %BASE%
+set SRC=mmc.c mparse.c mexpand.c mpattern.c marith.c mregex.c mvar.c mexec.c mjobs.c mbuiltin.c mbvars.c mbio.c mbtest.c mline.c %BASE%
 set CORE=tgrid.c tvt.c ttheme.c tfont.c tdraw.c
 set TSRC=mterm.c tapp.c tpty.c twin32.c tx11.c tcocoa.c %CORE% %BASE%
 rem Windows only: the .rc files put the icon (mmc.ico) and version details in
@@ -43,7 +45,7 @@ echo built mmc.exe, mmc-shell.exe and mmc-term.exe
 exit /b 0
 
 :test
-%ZIG% cc %CFLAGS% -target x86_64-windows-gnu -o ttest.exe ttest.c %CORE% %BASE% -lshell32 || exit /b 1
+%ZIG% cc %CFLAGS% -target x86_64-windows-gnu -o ttest.exe ttest.c %CORE% %BASE% -lgdi32 -lshell32 || exit /b 1
 .\ttest.exe
 exit /b %ERRORLEVEL%
 
@@ -54,13 +56,16 @@ for %%T in (x86_64 aarch64) do (
   %ZIG% cc %CFLAGS% -target %%T-windows-gnu -o dist\mmc-shell-%%T-windows.exe %SRC% %WINRES% || exit /b 1
   %ZIG% cc %CFLAGS% -target %%T-windows-gnu -o dist\mmc-term-%%T-windows.exe %TSRC% %TWINRES% || exit /b 1
   echo %%T-linux
+  rem static musl: the same program runs on any Linux, and on Android (Termux, adb shell)
   %ZIG% cc %CFLAGS% -target %%T-linux-musl -static -o dist\mmc-%%T-linux %SRC% || exit /b 1
   rem the window loads libX11 at run time: that needs the dynamic C library
-  %ZIG% cc %CFLAGS% -target %%T-linux-gnu -o dist\mmc-term-%%T-linux %TSRC% -ldl -lm || exit /b 1
+  %ZIG% cc %CFLAGS% -target %%T-linux-gnu -o dist\mmc-term-%%T-linux %TSRC% -ldl -lm -lpthread || exit /b 1
   echo %%T-macos
   %ZIG% cc %CFLAGS% -target %%T-macos -o dist\mmc-%%T-macos %SRC% || exit /b 1
   %ZIG% cc %CFLAGS% -target %%T-macos -o dist\mmc-term-%%T-macos %TSRC% -lm || exit /b 1
 )
+echo arm-linux (older 32 bit Android phones)
+%ZIG% cc %CFLAGS% -target arm-linux-musleabihf -static -o dist\mmc-arm-linux %SRC% || exit /b 1
 if exist dist\*.pdb del dist\*.pdb
 echo done, see dist\
 exit /b 0
@@ -77,9 +82,9 @@ call :put mmc.exe "%~2\mmc.exe" || exit /b 1
 call :put mmc.exe "%~2\mmc-shell.exe" || exit /b 1
 call :put mmc-term.exe "%~2\mmc-term.exe" || exit /b 1
 copy /y LICENSE "%~2\LICENSE" >nul
-rem the Hack font travels with mmc: mmc-term looks in usr\share\fonts first
+rem the Hack Nerd Font travels with mmc: mmc-term looks in usr\share\fonts first
 if not exist "%~2\usr\share\fonts" mkdir "%~2\usr\share\fonts"
-for %%F in (Hack-Regular.ttf Hack-Bold.ttf Hack-Italic.ttf Hack-LICENSE.md) do copy /y %%F "%~2\usr\share\fonts\%%F" >nul
+for %%F in (%FONTS%) do copy /y %%F "%~2\usr\share\fonts\%%F" >nul
 echo installed mmc.exe, mmc-shell.exe and mmc-term.exe in "%~2"
 echo add "%~2" to your PATH, then type: mmc-term  (the window)  or  mmc-shell
 exit /b 0

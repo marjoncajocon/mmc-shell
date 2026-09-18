@@ -1,0 +1,4 @@
+a b dir/c
+src/a.c src/b.c src/dir/c.c
+a.c b.c c.c
+status: 0

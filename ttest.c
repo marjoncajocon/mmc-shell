@@ -280,6 +280,59 @@ static void test_contrast (void) {
 }
 
 
+/* Powerline separators are geometry: they must fill their cell edge to
+** edge, or the colored segments of a prompt show seams */
+static void test_powerline (void) {
+  Config c;
+  Theme th;
+  Grid *g;
+  Vt vt;
+  Frame f;
+  Scene s;
+  const int cw = 9, ch = 18;
+  uint32_t red, bg;
+  int y, solid;
+  config_defaults(&c);
+  theme_apply(&th, theme_find("dark"), &c);
+  g = grid_new(3, 1, 0);
+  vt_init(&vt, g);
+  {
+    static const char pl[] = "\033[?25l\033[31m\xee\x82\xb0\xee\x82\xb2\xee\x82\xb8";
+    vt_feed(&vt, pl, sizeof(pl) - 1);
+  }
+  memset(&s, 0, sizeof(s));
+  s.g = g;
+  s.t = &th;
+  s.cw = cw;
+  s.ch = ch;
+  s.ascent = ch * 3 / 4;
+  memset(&f, 0, sizeof(f));
+  frame_resize(&f, 3 * cw, ch);
+  draw_scene(&f, &s);
+  red = theme_color(&th, COL_IDX(1), 1);
+  bg = th.bg;
+  /* U+E0B0, solid right arrow: left edge solid, tip on the right edge */
+  for (solid = 1, y = 1; y < ch - 1; y++) solid &= (f.px[y * f.w] == red);
+  check_int("powerline E0B0 left edge is solid", solid, 1);
+  check_int("powerline E0B0 tip reaches the right edge",
+            f.px[(ch / 2) * f.w + cw - 1] != bg, 1);
+  check_int("powerline E0B0 corner stays background", f.px[cw - 1] == bg, 1);
+  /* U+E0B2, solid left arrow: the mirror image */
+  for (solid = 1, y = 1; y < ch - 1; y++) solid &= (f.px[y * f.w + 2 * cw - 1] == red);
+  check_int("powerline E0B2 right edge is solid", solid, 1);
+  check_int("powerline E0B2 tip reaches the left edge",
+            f.px[(ch / 2) * f.w + cw] != bg, 1);
+  /* U+E0B8, lower left triangle: the whole bottom row, not the top right */
+  for (solid = 1, y = 2 * cw; y < 3 * cw - 1; y++)
+    solid &= (f.px[(ch - 1) * f.w + y] == red);
+  check_int("powerline E0B8 bottom row is solid", solid, 1);
+  check_int("powerline E0B8 top right stays background", f.px[3 * cw - 1] == bg, 1);
+  frame_free(&f);
+  vt_free(&vt);
+  grid_free(g);
+}
+
+
 static const char *const demo =
   "\033]0;MMC:~/w/mmc\007"
   "\033[32mmarjon@DESKTOP \033[0;44;97;1m MMC \033[0m \033[1m~/w/mmc\033[0;36m (main)\033[0m\r\n"
@@ -387,6 +440,7 @@ int main (int argc, char **argv) {
     return render(argv[2], argc > 3 ? argv[3] : "dark", argc > 4 ? argv[4] : NULL);
   test_core();
   test_contrast();
+  test_powerline();
   printf("%d checks, %d failed\n", checks, failures);
   return failures ? 1 : 0;
 }

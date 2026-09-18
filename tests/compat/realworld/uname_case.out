@@ -1,0 +1,8 @@
+MINGW64_NT-10.0-26200 -> windows
+MSYS_NT-10.0 -> windows
+CYGWIN_NT-10.0 -> windows
+Linux -> linux
+Darwin -> macos
+FreeBSD -> unknown
+real os detected
+status: 0

@@ -1,0 +1,9 @@
+echo is a shell builtin
+if is a shell keyword
+greet is a function
+greet () 
+{ 
+    echo hi
+}
+status 1
+status: 0

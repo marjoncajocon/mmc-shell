@@ -83,6 +83,23 @@ void line_hist_add (const char *s) {
 }
 
 
+void line_hist_delete (int index) {
+  if (index < 0 || (size_t)index >= hist.n) return;
+  free(hist.v[index]);
+  memmove(hist.v + index, hist.v + index + 1, (hist.n - (size_t)index) * sizeof(char *));
+  hist.n--;
+}
+
+
+void line_hist_write (const char *native) {
+  int fd = os_open(native, OS_WRITE);
+  size_t i;
+  if (fd < 0) return;
+  for (i = 0; i < hist.n; i++) fd_printf(fd, "%s\n", hist.v[i]);
+  os_close(fd);
+}
+
+
 void line_hist_clear (void) {
   vec_free(&hist);
   if (hist_file != NULL) {
@@ -176,7 +193,14 @@ static void ed_refresh (const Edit *e) {
   buf_init(&o);
   buf_putc(&o, '\r');
   buf_puts(&o, e->prompt);
-  buf_putn(&o, e->buf + start, end - start);
+  {	/* a pasted block keeps its newlines: they show as a return sign */
+    size_t k;
+    for (k = start; k < end; k++) {
+      if (e->buf[k] == '\n') buf_puts(&o, "\xe2\x86\xb5");
+      else if (e->buf[k] == '\t') buf_putc(&o, ' ');
+      else buf_putc(&o, e->buf[k]);
+    }
+  }
   buf_puts(&o, "\033[K\r");
   if (e->pwidth + ccol > 0) {
     sprintf(move, "\033[%luC", (unsigned long)(e->pwidth + ccol));
@@ -213,11 +237,12 @@ static void push_unique (Vec *v, char *s) {
 static void complete_commands (const char *prefix, Vec *out) {
   Vec names, dirs;
   size_t i, k;
-  char *path = os_getenv("PATH");
+  char *path = var_get("PATH") ? xstrdup(var_get("PATH")) : NULL;
   vec_init(&names);
   vec_init(&dirs);
   builtin_names(&names);
   alias_names(&names);
+  func_names(&names);
   for (i = 0; i < names.n; i++)
     if (strncmp(names.v[i], prefix, strlen(prefix)) == 0)
       push_unique(out, xstrdup(names.v[i]));
@@ -260,9 +285,8 @@ static void complete_files (const char *word, Vec *out) {
   Vec files;
   size_t i;
   if (dirpart[0] == '~' && dirpart[1] == '/') {
-    char *home = os_getenv("HOME");
+    const char *home = var_get("HOME");
     lookup = xstrcat3(home ? home : "", dirpart + 1, "");
-    free(home);
   }
   else lookup = xstrdup(dirpart[0] ? dirpart : ".");
   native = path_to_native(lookup);
@@ -418,7 +442,7 @@ static char *read_plain (int tty) {
 
 /* reads the rest of an escape sequence; returns an editing action */
 enum { K_NONE, K_UP, K_DOWN, K_LEFT, K_RIGHT, K_HOME, K_END, K_DEL,
-       K_WLEFT, K_WRIGHT, K_WDEL };
+       K_WLEFT, K_WRIGHT, K_WDEL, K_PASTE };
 
 static int read_escape (void) {
   char seq[16];
@@ -446,9 +470,45 @@ static int read_escape (void) {
         case 1: case 7: return K_HOME;
         case 4: case 8: return K_END;
         case 3: return K_DEL;
+        case 200: return K_PASTE;	/* bracketed paste starts */
       }
   }
   return K_NONE;
+}
+
+
+/* the text of a bracketed paste, up to ESC [ 2 0 1 ~ */
+static void read_paste (Edit *e) {
+  static const char end[] = "\033[201~";
+  Buf b;
+  size_t match = 0;
+  int last = 0;
+  buf_init(&b);
+  for (;;) {
+    int c = os_tty_getbyte();
+    if (c < 0) break;
+    if ((char)c == end[match]) {
+      if (++match == sizeof(end) - 1) break;
+      continue;
+    }
+    if (match > 0) {	/* a false start: keep what looked like the end */
+      buf_putn(&b, end, match);
+      match = 0;
+      if ((char)c == end[0]) {
+        match = 1;
+        continue;
+      }
+    }
+    if (c == '\n' && last == '\r') {	/* CRLF: the \r already made the newline */
+      last = c;
+      continue;
+    }
+    last = c;
+    if (c == '\r') c = '\n';
+    buf_putc(&b, (char)c);
+  }
+  if (b.len > 0) ed_insert(e, b.s, b.len);
+  buf_free(&b);
 }
 
 
@@ -487,6 +547,7 @@ char *line_read (const char *prompt) {
   e.len = e.pos = 0;
   e.prompt = prompt;
   e.pwidth = prompt_width(prompt);
+  os_write(1, "\033[?2004h", 8);	/* bracketed paste on */
   ed_refresh(&e);
   while (!done) {
     int c = os_tty_getbyte();
@@ -544,6 +605,7 @@ char *line_read (const char *prompt) {
       case K_WRIGHT: e.pos = ed_word_right(&e, e.pos); break;
       case K_DEL: ed_delete(&e, e.pos, ed_next(&e, e.pos)); break;
       case K_WDEL: ed_delete(&e, ed_word_left(&e, e.pos), e.pos); break;
+      case K_PASTE: read_paste(&e); break;
       case K_UP:
       case K_DOWN:
         if (key == K_UP && hpos == 0) break;
@@ -566,8 +628,38 @@ char *line_read (const char *prompt) {
     }
     result = e.buf;
   }
-  os_write(1, "\r\n", 2);
+  os_write(1, "\033[?2004l\r\n", 10);	/* bracketed paste off */
   os_tty_raw(0);
   free(typed);
   return result;
+}
+
+
+/* for select: bytes up to the delimiter; NULL at the end of input */
+char *line_read_raw (int fd, int delim, int nchars, int silent, int timeout_ms,
+                     int *timed_out) {
+  Buf b;
+  int any = 0;
+  (void)silent;
+  *timed_out = 0;
+  buf_init(&b);
+  for (;;) {
+    unsigned char c;
+    if (nchars >= 0 && (int)b.len >= nchars) break;
+    if (timeout_ms >= 0 && os_wait_readable(fd, timeout_ms) == 0) {
+      *timed_out = 1;
+      break;
+    }
+    if (os_read(fd, &c, 1) != 1) break;
+    any = 1;
+    if (c == (unsigned char)delim) break;
+    buf_putc(&b, (char)c);
+  }
+  if (!any) {
+    buf_free(&b);
+    return NULL;
+  }
+  if (b.len > 0 && b.s[b.len - 1] == '\r') b.s[--b.len] = '\0';
+  if (b.s == NULL) return xstrdup("");
+  return buf_take(&b);
 }

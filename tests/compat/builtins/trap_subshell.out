@@ -1,0 +1,5 @@
+in subshell
+inner exit
+main
+outer exit
+status: 0

@@ -116,11 +116,44 @@ static char *flip (const char *p, char from, char to) {
 }
 
 
+/*
+** git-bash's /tmp is the Windows temp folder (%TEMP%), and the programs
+** that come with it (mktemp ...) print /tmp paths: mmc's /tmp is the same
+** folder, or those paths would not be found.
+*/
+static const char *win_temp (void) {
+  static char *t = NULL;
+  if (t == NULL) {
+    size_t n;
+    t = os_getenv("TEMP");
+    if (t == NULL) t = os_getenv("TMP");
+    if (t == NULL) t = xstrdup("");
+    n = strlen(t);
+    while (n > 3 && path_is_sep(t[n - 1])) t[--n] = '\0';
+  }
+  return t;
+}
+
+
+static int is_tmp_path (const char *p) {
+  return strncmp(p, "/tmp", 4) == 0 && (p[4] == '\0' || p[4] == '/') && win_temp()[0];
+}
+
+
 char *path_to_native (const char *p) {
   char *r, *rest;
   if (strcmp(p, "/dev/null") == 0) return xstrdup("NUL");
-  if (p[0] != '/' || p[1] == '/')	/* relative, "C:/x" or "//server" */
+  /* "//x" without a share is "/x": what "$dir/x" gives when dir is "/" */
+  if (p[0] == '/' && p[1] == '/' && p[2] != '/' && p[2] != '\0' && strchr(p + 2, '/') == NULL)
+    return path_to_native(p + 1);
+  if (p[0] != '/' || p[1] == '/')	/* relative, "C:/x" or "//server/share" */
     return flip(p, '/', '\\');
+  if (is_tmp_path(p)) {
+    rest = flip(p + 4, '/', '\\');
+    r = xstrcat3(win_temp(), rest, "");
+    free(rest);
+    return r;
+  }
   if (isalpha((unsigned char)p[1]) && (p[2] == '/' || p[2] == '\0')) {
     char drive[3];
     drive[0] = (char)toupper((unsigned char)p[1]);
@@ -160,6 +193,17 @@ char *path_to_display (const char *native) {
     if (strcmp(r, "/dev/null") != 0) return r;
     free(r);
   }
+  {	/* %TEMP% is /tmp */
+    const char *t = win_temp();
+    size_t tn = strlen(t);
+    if (tn > 0 && m_strnicmp(native, t, tn) == 0 &&
+        (native[tn] == '\0' || path_is_sep(native[tn]))) {
+      char *tail = flip(native + tn, '\\', '/');
+      r = xstrcat3("/tmp", tail, "");
+      free(tail);
+      return r;
+    }
+  }
   return path_to_drive(native);
 }
 
@@ -178,6 +222,7 @@ static int looks_posix (const char *a) {
   if (isalpha((unsigned char)a[1]) && a[2] == '/') return 1;	/* /d/... */
   if (isalpha((unsigned char)a[1]) && a[2] == '\0') return 0;	/* /c */
   if (strcmp(a, "/dev/null") == 0) return 1;
+  if (is_tmp_path(a)) return 1;
   n = strcspn(a + 1, "/");	/* first component must exist in the root */
   name = xstrndup(a + 1, n);
   full = path_join(path_root(), name);

@@ -1,0 +1,6 @@
+x
+up ok
+x old=tmp
+status 1
+pwd matches
+status: 0

@@ -1,0 +1,4 @@
+job 1 status 1 -> result 1
+job 2 status 0 -> result 2
+job 3 status 1 -> result 3
+status: 0

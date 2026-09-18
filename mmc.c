@@ -8,6 +8,7 @@
 
 #include "mmc.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,8 +16,9 @@
 
 static const char *const default_profile =
   "# /etc/profile - settings for everyone who uses this MMC folder.\n"
-  "# Read once when mmc starts. Syntax is a small bash-like subset:\n"
+  "# Read once when mmc starts. The syntax is bash's:\n"
   "#   export NAME=value    alias name='value'    source file    # comment\n"
+  "#   if/for/case, functions, $(command) ... all work here too\n"
   "#\n"
   "# Paths are Linux style (on Windows too):\n"
   "#   /             the MMC folder (where the mmc program is)\n"
@@ -40,6 +42,10 @@ static const char *const default_rc =
 
 static char *g_exe;	/* native path of this program */
 static char *g_home;	/* native path of the home directory */
+
+
+const char *mmc_home (void) { return g_home; }
+const char *mmc_exe (void) { return g_exe; }
 
 
 static void write_default (const char *native, const char *text) {
@@ -73,6 +79,28 @@ static void setup_root (const char *argv0, const char *forced) {
   }
   path_set_root(dir);
   free(dir);
+}
+
+
+/* where temporary files go: $TMPDIR, /tmp (not Windows), <root>/tmp */
+char *path_tmpdir (void) {
+  const char *t = var_get("TMPDIR");
+  OsStat st;
+  if (t != NULL && *t) {
+    char *native = path_to_native(t);
+    if (os_stat(native, &st) == 0 && st.is_dir) return native;
+    free(native);
+  }
+  {	/* /tmp: the system's (on Windows %TEMP%, like git-bash) */
+    char *native = path_to_native("/tmp");
+    if (os_stat(native, &st) == 0 && st.is_dir && os_access(native, 'w')) return native;
+    free(native);
+  }
+  {
+    char *tmp = path_join(path_root(), "tmp");
+    mkdir_p(tmp);
+    return tmp;
+  }
 }
 
 
@@ -138,30 +166,37 @@ static char *portable_user (void) {
 }
 
 
+static void export_var (const char *name, const char *value) {
+  var_set(name, value);
+  var_set_flags(name, V_EXPORT, 0);
+}
+
+
 static void setup_env (void) {
   Buf path;
-  char level[16];
+  char num[24];
   char *user = portable_user();
   char *host = os_hostname();
-  char *old = os_getenv("PATH");
-  char *lvl = os_getenv("MMC_LEVEL");
+  const char *old = var_get("PATH");
+  const char *lvl = var_get("MMC_LEVEL");
+  char *oldcopy = old ? xstrdup(old) : NULL;
   char *exedir = path_dirname(g_exe);
   char *rootp, *home, *shell, *tmp;
+  int level = lvl ? atoi(lvl) : 0;
 #ifdef _WIN32
-  char *term = os_getenv("TERM");
+  const char *term = var_get("TERM");
   char *drive = path_to_drive(path_root());
   rootp = xstrdup("");	/* the root is simply "/" */
-  os_setenv("MMC_ROOT", drive);
+  export_var("MMC_ROOT", drive);
   if (drive[0] == '/' && drive[1] != '\0') {
     drive[2] = '\0';
-    os_setenv("MMC_DRIVE", drive);
+    export_var("MMC_DRIVE", drive);
   }
-  if (term == NULL) os_setenv("TERM", "xterm-256color");
-  free(term);
+  if (term == NULL) export_var("TERM", "xterm-256color");
   free(drive);
 #else
   rootp = xstrdup(path_root());
-  os_setenv("MMC_ROOT", rootp);
+  export_var("MMC_ROOT", rootp);
 #endif
   home = xstrcat3(rootp, "/home/", user);
   g_home = path_to_native(home);
@@ -169,7 +204,7 @@ static void setup_env (void) {
   shell = path_to_display(g_exe);
   buf_init(&path);
   if (lvl != NULL) {	/* nested mmc: PATH is set up already, keep its order */
-    buf_puts(&path, old ? old : "");
+    buf_puts(&path, oldcopy ? oldcopy : "");
     buf_puts(&path, ":");
   }
   buf_puts(&path, rootp);
@@ -178,17 +213,68 @@ static void setup_env (void) {
   buf_puts(&path, "/bin:");
   buf_puts(&path, tmp);	/* before the system: Windows has its own mmc.exe */
   buf_puts(&path, ":");
-  buf_puts(&path, old ? old : "");
-  sh_setvar("PATH", path.s);
-  os_setenv("HOME", home);
-  os_setenv("USER", user);
-  os_setenv("HOSTNAME", host);
-  os_setenv("SHELL", shell);
-  sprintf(level, "%d", (lvl ? atoi(lvl) : 0) + 1);
-  os_setenv("MMC_LEVEL", level);
+  buf_puts(&path, oldcopy ? oldcopy : "");
+  export_var("PATH", path.s);
+  export_var("HOME", home);
+  export_var("USER", user);
+  export_var("HOSTNAME", host);
+  export_var("SHELL", shell);
+  export_var("MMC_LEVEL", ll_to_str(level + 1, num));
+  {
+    const char *sl = var_get("SHLVL");
+    export_var("SHLVL", ll_to_str((sl ? atoi(sl) : 0) + 1, num));
+  }
   buf_free(&path);
-  free(user); free(host); free(old); free(lvl); free(exedir);
+  free(user); free(host); free(oldcopy); free(exedir);
   free(rootp); free(home); free(shell); free(tmp);
+}
+
+
+/* the variables bash sets for itself */
+static void setup_shell_vars (void) {
+  char num[24], *cwd, *shown;
+  Buf mt;
+  var_set("BASH_VERSION", MMC_BASH_COMPAT);
+  var_make_array("BASH_VERSINFO", 0);
+  var_aset("BASH_VERSINFO", 0, "5");
+  var_aset("BASH_VERSINFO", 1, "2");
+  var_aset("BASH_VERSINFO", 2, "0");
+  var_aset("BASH_VERSINFO", 3, "1");
+  var_aset("BASH_VERSINFO", 4, "release");
+  var_set("MMC_VERSION", MMC_VERSION);
+  {
+    char *shown_exe = path_to_display(g_exe);
+    var_set("BASH", shown_exe);
+    free(shown_exe);
+  }
+  var_set("OSTYPE", os_type());
+  var_set("HOSTTYPE", os_machine());
+  buf_init(&mt);
+  buf_puts(&mt, os_machine());
+  buf_puts(&mt, strcmp(os_type(), "darwin") == 0 ? "-apple-" : "-pc-");
+  buf_puts(&mt, os_type());
+  var_set("MACHTYPE", mt.s);
+  buf_free(&mt);
+  var_set("PPID", ll_to_str(os_getppid(), num));
+  var_set("UID", ll_to_str(os_getuid(), num));
+  var_set("EUID", ll_to_str(os_geteuid(), num));
+  var_set_flags("PPID", V_READONLY, 0);
+  var_set_flags("UID", V_READONLY, 0);
+  var_set_flags("EUID", V_READONLY, 0);
+  if (var_get("IFS") == NULL) var_set("IFS", " \t\n");
+  var_set("OPTIND", "1");
+  var_set("BASH_SUBSHELL", "0");
+  if (var_get("PS2") == NULL) var_set("PS2", "> ");
+  if (var_get("PS4") == NULL) var_set("PS4", "+ ");
+  if (var_get("PS1") == NULL) var_set("PS1", "\\s-\\v\\$ ");
+  if (var_get("HISTSIZE") == NULL) var_set("HISTSIZE", "1000");
+  cwd = os_getcwd();
+  shown = path_to_display(cwd);
+  export_var("PWD", shown);
+  free(cwd);
+  free(shown);
+  var_unset("OLDPWD");
+  var_set("MMC_ROOT_NATIVE", path_root());
 }
 
 
@@ -211,12 +297,13 @@ static void setup_tree (void) {
 }
 
 
-static void source_config (int top_level) {
+static void source_config (int top_level, int norc, int noprofile) {
   char *etc = path_join(path_root(), "etc");
   char *profile = path_join(etc, "profile");
   char *rc = path_join(g_home, ".mmcrc");
-  if (top_level) sh_source(profile, 0);	/* nested shells inherit it */
-  if (top_level || sh_interactive) sh_source(rc, 0);
+  if (top_level && !noprofile) sh_source(profile, 0, NULL, 0);	/* nested shells inherit it */
+  if ((top_level || sh_interactive) && sh_interactive && !norc) sh_source(rc, 0, NULL, 0);
+  else if (top_level && !norc && !noprofile) sh_source(rc, 0, NULL, 0);
   sh_status = 0;
   sh_exit = 0;
   free(etc); free(profile); free(rc);
@@ -287,27 +374,41 @@ static char *git_branch (const char *cwd) {
 
 #define LINE	"\033[0;94m"	/* the connector lines: the blue of the logo */
 
-/* MMC_PROMPT=classic in /etc/profile or ~/.mmcrc gives the one line prompt */
-static int prompt_is_classic (void) {
-  char *style = os_getenv("MMC_PROMPT");
-  int classic = style != NULL && strcmp(style, "classic") == 0;
-  free(style);
-  return classic;
+/* MMC_PROMPT: parrot (default), classic, powerline, or ps1 (your $PS1) */
+static const char *prompt_style (void) {
+  const char *style = var_get("MMC_PROMPT");
+  return style ? style : "parrot";
 }
 
 
-static const char *prompt_last_line (void) {
-  return prompt_is_classic() ? "\033[32m$\033[0m "
-                             : LINE "└──╼ \033[0;33m$\033[0m ";
+static char *prompt_last_line (void) {
+  const char *st = prompt_style();
+  if (strcmp(st, "ps1") == 0) {
+    const char *ps1 = var_get("PS1");
+    return expand_prompt(ps1 ? ps1 : "$ ");
+  }
+  if (strcmp(st, "classic") == 0) return xstrdup("\033[32m$\033[0m ");
+  if (strcmp(st, "powerline") == 0)	/* a small arrow on the second line */
+    return xstrdup("\033[0;32m\xef\x84\xa0 \033[0;94m\xee\x82\xb1\033[0m ");
+  return xstrdup(LINE "\xe2\x94\x94\xe2\x94\x80\xe2\x94\x80\xe2\x95\xbc \033[0;33m$\033[0m ");
+}
+
+
+/* one segment of the powerline prompt: text on a color, arrow into the next */
+static void pl_segment (Buf *b, const char *fg, int bg, int next_bg, const char *text) {
+  buf_printf(b, "\033[%s;%dm %s ", fg, 40 + bg, text);
+  if (next_bg >= 0) buf_printf(b, "\033[%d;%dm\xee\x82\xb0", 30 + bg, 40 + next_bg);
+  else buf_printf(b, "\033[0;%dm\xee\x82\xb0\033[0m", 30 + bg);
 }
 
 
 static void show_prompt_header (void) {
   char *cwd = os_getcwd();
   char *shown = path_to_display(cwd);
-  char *home = os_getenv("HOME");
-  char *user = os_getenv("USER");
-  char *host = os_getenv("HOSTNAME");
+  const char *home = var_get("HOME");
+  const char *user = var_get("USER");
+  const char *host = var_get("HOSTNAME");
+  const char *st = prompt_style();
   char *branch = git_branch(cwd);
   size_t hn = home ? strlen(home) : 0;
   Buf b;
@@ -319,22 +420,48 @@ static void show_prompt_header (void) {
   }
   else buf_puts(&b, shown);
   fd_printf(1, "\033]0;MMC:%s\007\n", b.s);
-  if (prompt_is_classic()) {	/* one line, like git-bash */
+  if (strcmp(st, "ps1") == 0) {
+    /* all of it is in PS1 */
+  }
+  else if (strcmp(st, "classic") == 0) {	/* one line, like git-bash */
     fd_printf(1, "\033[32m%s@%s \033[0;7;34m MMC \033[0m %s",
               user ? user : "", host ? host : "", b.s);
     if (branch) fd_printf(1, "\033[0;36m (%s)", branch);
+    fd_puts(1, "\033[0m\n");
+  }
+  else if (strcmp(st, "powerline") == 0) {	/* segments and arrows */
+    Buf p;
+    char who[256];
+    buf_init(&p);
+    if (sh_status != 0) {
+      char num[48];
+      sprintf(num, "\xe2\x9c\x98 %d", sh_status);
+      pl_segment(&p, "1;97", 1, 2, num);
+    }
+    sprintf(who, "%.100s@%.100s", user ? user : "", host ? host : "");
+    pl_segment(&p, "30", 2, 4, who);
+    if (branch) {
+      char br[300];
+      pl_segment(&p, "97", 4, 5, b.s);
+      sprintf(br, "\xee\x82\xa0 %.200s", branch);
+      pl_segment(&p, "30", 5, -1, br);
+    }
+    else pl_segment(&p, "97", 4, -1, b.s);
+    buf_puts(&p, "\n");
+    os_write(1, p.s, p.len);
+    buf_free(&p);
   }
   else {	/* connector lines and brackets, like Parrot OS, in blue */
-    fd_puts(1, LINE "┌─");
-    if (sh_status != 0) fd_puts(1, "[\033[0;31m✗" LINE "]─");
-    fd_printf(1, "[\033[0;92m%s\033[0;33m@\033[0;96m%s" LINE "]─[\033[0;94mMMC"
-                 LINE "]─[\033[0;32m%s" LINE "]",
+    fd_puts(1, LINE "\xe2\x94\x8c\xe2\x94\x80");
+    if (sh_status != 0) fd_puts(1, "[\033[0;31m\xe2\x9c\x97" LINE "]\xe2\x94\x80");
+    fd_printf(1, "[\033[0;92m%s\033[0;33m@\033[0;96m%s" LINE "]\xe2\x94\x80[\033[0;94mMMC"
+                 LINE "]\xe2\x94\x80[\033[0;32m%s" LINE "]",
               user ? user : "", host ? host : "", b.s);
-    if (branch) fd_printf(1, "─[\033[0;36m%s" LINE "]", branch);
+    if (branch) fd_printf(1, "\xe2\x94\x80[\033[0;36m%s" LINE "]", branch);
+    fd_puts(1, "\033[0m\n");
   }
-  fd_puts(1, "\033[0m\n");
   buf_free(&b);
-  free(cwd); free(shown); free(home); free(user); free(host); free(branch);
+  free(cwd); free(shown); free(branch);
 }
 
 /* }================================================================== */
@@ -349,12 +476,12 @@ static void show_prompt_header (void) {
 */
 
 static const char *const banner_art[] = {
-  "███╗   ███╗ ███╗   ███╗  ██████╗",
-  "████╗ ████║ ████╗ ████║ ██╔════╝",
-  "██╔████╔██║ ██╔████╔██║ ██║     ",
-  "██║╚██╔╝██║ ██║╚██╔╝██║ ██║     ",
-  "██║ ╚═╝ ██║ ██║ ╚═╝ ██║ ╚██████╗",
-  "╚═╝     ╚═╝ ╚═╝     ╚═╝  ╚═════╝",
+  "\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x95\x97   \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x95\x97 \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x95\x97   \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x95\x97  \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x95\x97",
+  "\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x95\x97 \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x95\x91 \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x95\x97 \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x95\x91 \xe2\x96\x88\xe2\x96\x88\xe2\x95\x94\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x9d",
+  "\xe2\x96\x88\xe2\x96\x88\xe2\x95\x94\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x95\x94\xe2\x96\x88\xe2\x96\x88\xe2\x95\x91 \xe2\x96\x88\xe2\x96\x88\xe2\x95\x94\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x95\x94\xe2\x96\x88\xe2\x96\x88\xe2\x95\x91 \xe2\x96\x88\xe2\x96\x88\xe2\x95\x91     ",
+  "\xe2\x96\x88\xe2\x96\x88\xe2\x95\x91\xe2\x95\x9a\xe2\x96\x88\xe2\x96\x88\xe2\x95\x94\xe2\x95\x9d\xe2\x96\x88\xe2\x96\x88\xe2\x95\x91 \xe2\x96\x88\xe2\x96\x88\xe2\x95\x91\xe2\x95\x9a\xe2\x96\x88\xe2\x96\x88\xe2\x95\x94\xe2\x95\x9d\xe2\x96\x88\xe2\x96\x88\xe2\x95\x91 \xe2\x96\x88\xe2\x96\x88\xe2\x95\x91     ",
+  "\xe2\x96\x88\xe2\x96\x88\xe2\x95\x91 \xe2\x95\x9a\xe2\x95\x90\xe2\x95\x9d \xe2\x96\x88\xe2\x96\x88\xe2\x95\x91 \xe2\x96\x88\xe2\x96\x88\xe2\x95\x91 \xe2\x95\x9a\xe2\x95\x90\xe2\x95\x9d \xe2\x96\x88\xe2\x96\x88\xe2\x95\x91 \xe2\x95\x9a\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x95\x97",
+  "\xe2\x95\x9a\xe2\x95\x90\xe2\x95\x9d     \xe2\x95\x9a\xe2\x95\x90\xe2\x95\x9d \xe2\x95\x9a\xe2\x95\x90\xe2\x95\x9d     \xe2\x95\x9a\xe2\x95\x90\xe2\x95\x9d  \xe2\x95\x9a\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90\xe2\x95\x9d",
   NULL
 };
 
@@ -370,10 +497,8 @@ static int has_truecolor (void) {
 #ifdef _WIN32
   return 1;	/* the Windows 10+ console and Windows Terminal do */
 #else
-  char *ct = os_getenv("COLORTERM");
-  int yes = ct != NULL && (strstr(ct, "truecolor") || strstr(ct, "24bit"));
-  free(ct);
-  return yes;
+  const char *ct = var_get("COLORTERM");
+  return ct != NULL && (strstr(ct, "truecolor") || strstr(ct, "24bit"));
 #endif
 }
 
@@ -435,10 +560,49 @@ static void show_banner (void) {
   os_write(1, b.s, b.len);
   buf_free(&b);
 }
+
 /* }================================================================== */
 
 
+/*
+** {==================================================================
+** Reading commands: the prompt, continuation lines, history
+** ===================================================================
+*/
+
+/* a multi-line command as one history line: "if x; then y; fi" */
+static char *history_line (const char *cmd) {
+  Buf b;
+  const char *p = cmd;
+  buf_init(&b);
+  while (*p) {
+    const char *nl = strchr(p, '\n');
+    size_t n = nl ? (size_t)(nl - p) : strlen(p);
+    buf_putn(&b, p, n);
+    if (nl == NULL) break;
+    p = nl + 1;
+    if (*p == '\0') break;
+    {	/* after "then", "do", "{", "|", "&&" ... a space; else "; " */
+      size_t k = b.len;
+      static const char *const open[] = {"then", "do", "else", "{", "(", "|", "&&", "||",
+                                         "in", ";", "&", NULL};
+      int soft = 0, j;
+      while (k > 0 && (b.s[k - 1] == ' ' || b.s[k - 1] == '\t')) k--;
+      for (j = 0; open[j] && !soft; j++) {
+        size_t ol = strlen(open[j]);
+        if (k >= ol && strncmp(b.s + k - ol, open[j], ol) == 0 &&
+            (k == ol || b.s[k - ol - 1] == ' ' || !isalnum((unsigned char)b.s[k - ol - 1]) || ol == 1))
+          soft = 1;
+      }
+      buf_puts(&b, (soft || k == 0) ? " " : "; ");
+    }
+  }
+  return buf_take(&b);
+}
+
+
 static void repl (void) {
+  int line0 = 1;
   if (sh_interactive) {
     char *hf = path_join(g_home, ".mmc_history");
     line_hist_load(hf);
@@ -446,88 +610,402 @@ static void repl (void) {
     show_banner();
   }
   while (!sh_exit) {
+    Buf cmd;
     char *line;
-    if (sh_interactive) {
-      os_reap();
-      os_tty_fix();
-      show_prompt_header();
+    int first = 1, r;
+    buf_init(&cmd);
+    for (;;) {
+      char *prompt;
+      if (sh_interactive) {
+        job_poll(1);
+        os_tty_fix();
+        os_interrupted = 0;
+        if (first) show_prompt_header();
+        prompt = first ? prompt_last_line() : expand_prompt(var_get("PS2") ? var_get("PS2") : "> ");
+      }
+      else prompt = xstrdup("");
+      line = line_read(prompt);
+      free(prompt);
+      if (line == NULL) break;
+      if (first && strncmp(line, "\xEF\xBB\xBF", 3) == 0)	/* UTF-8 BOM from a pipe */
+        memmove(line, line + 3, strlen(line + 3) + 1);
+      if (!first) buf_putc(&cmd, '\n');
+      buf_puts(&cmd, line);
+      free(line);
+      first = 0;
+      if (cmd.len > 0 && cmd.s[cmd.len - 1] == '\\' &&
+          (cmd.len < 2 || cmd.s[cmd.len - 2] != '\\')) {	/* a line continuation */
+        continue;
+      }
+      r = parse_is_complete(cmd.s ? cmd.s : "");
+      if (r != P_INCOMPLETE) break;
     }
-    line = line_read(sh_interactive ? prompt_last_line() : "");
-    if (line == NULL) {
+    if (first && line == NULL) {	/* end of input */
       if (sh_interactive) fd_puts(1, "exit\n");
+      buf_free(&cmd);
       break;
     }
-    if (sh_interactive) line_hist_add(line);
-    if (strncmp(line, "\xEF\xBB\xBF", 3) == 0)	/* UTF-8 BOM from a pipe */
-      memmove(line, line + 3, strlen(line + 3) + 1);
-    sh_run_line(line);
-    free(line);
+    if (cmd.s == NULL) {
+      buf_free(&cmd);
+      if (line == NULL) break;
+      continue;
+    }
+    if (sh_interactive && cmd.s[0] != '\0') {
+      char *h = history_line(cmd.s);
+      line_hist_add(h);
+      free(h);
+    }
+    sh_run_string(cmd.s, sh_interactive ? NULL : "mmc", line0);
+    {	/* line numbers keep counting over the whole input */
+      const char *p;
+      for (p = cmd.s; *p; p++)
+        if (*p == '\n') line0++;
+      line0++;
+    }
+    buf_free(&cmd);
+    if (line == NULL) break;
+    if (sh_interactive) {
+      os_interrupted = 0;
+      if (sh_exit && job_count() > 0) {	/* like bash: say it once */
+      }
+    }
   }
 }
+
+/* }================================================================== */
+
+
+/*
+** {==================================================================
+** mmc --check: syntax and commands, without running anything
+** ===================================================================
+*/
+
+typedef struct Check {
+  const char *file;
+  Vec funcs;	/* functions the script defines */
+  Vec missing;	/* "line: name" already reported */
+  int problems;
+  int sources;	/* the script sources other files: they may define more */
+} Check;
+
+
+static int plain_word (const char *w) {
+  return w[0] != '\0' && strpbrk(w, "$`'\"\\*?[{~=") == NULL;
+}
+
+
+static void check_node (Check *c, Node *n);
+
+
+static void check_list (Check *c, Node **k, int n) {
+  int i;
+  for (i = 0; i < n; i++) check_node(c, k[i]);
+}
+
+
+static void collect_funcs (Check *c, Node *n) {
+  int i;
+  CaseItem *it;
+  if (n == NULL) return;
+  if (n->type == N_FUNC) vec_push(&c->funcs, xstrdup(n->str));
+  if (n->type == N_SIMPLE && n->nwords > 0 && (strcmp(n->words[0], "source") == 0 ||
+                                          strcmp(n->words[0], ".") == 0))
+    c->sources = 1;
+  collect_funcs(c, n->a);
+  collect_funcs(c, n->b);
+  collect_funcs(c, n->c);
+  for (i = 0; i < n->nkids; i++) collect_funcs(c, n->kids[i]);
+  for (it = n->items; it != NULL; it = it->next) collect_funcs(c, it->body);
+}
+
+
+static int known_command (Check *c, const char *name) {
+  size_t i;
+  char *exe;
+  if (builtin_find(name, 0) || builtin_find(name, 1) || alias_get(name) ||
+      parse_is_keyword(name) || func_find(name))
+    return 1;
+  for (i = 0; i < c->funcs.n; i++)
+    if (strcmp(c->funcs.v[i], name) == 0) return 1;
+  if ((exe = sh_find_command(name)) != NULL) {
+    free(exe);
+    return 1;
+  }
+  return 0;
+}
+
+
+static void check_node (Check *c, Node *n) {
+  CaseItem *it;
+  if (n == NULL) return;
+  switch (n->type) {
+    case N_SIMPLE:
+      if (n->nwords > 0 && plain_word(n->words[0]) && !known_command(c, n->words[0])) {
+        size_t i;
+        int seen = 0;
+        for (i = 0; i < c->missing.n; i++)
+          if (strcmp(c->missing.v[i], n->words[0]) == 0) seen = 1;
+        if (!seen) {
+          if (c->sources)	/* it may come from a file the script reads */
+            fd_printf(1, "%s:%d: note: '%s' is not a builtin, function or program here "
+                         "(maybe defined in a sourced file)\n", c->file, n->line, n->words[0]);
+          else {
+            fd_printf(1, "%s:%d: '%s': command not found (not a builtin, function or in PATH)\n",
+                      c->file, n->line, n->words[0]);
+            c->problems++;
+          }
+          vec_push(&c->missing, xstrdup(n->words[0]));
+        }
+      }
+      break;
+    case N_COPROC:
+      fd_printf(1, "%s:%d: coproc is not supported by mmc\n", c->file, n->line);
+      c->problems++;
+      break;
+    default:
+      break;
+  }
+  check_node(c, n->a);
+  check_node(c, n->b);
+  check_node(c, n->c);
+  if (n->kids) check_list(c, n->kids, n->nkids);
+  for (it = n->items; it != NULL; it = it->next) check_node(c, it->body);
+}
+
+
+static int check_file (const char *name) {
+  char *native = path_to_native(name);
+  size_t len = 0;
+  char *text = read_file(native, &len);
+  Parser *p;
+  Check c;
+  Vec progs;
+  int r, lines = 0;
+  size_t i;
+  free(native);
+  if (text == NULL) {
+    fd_printf(2, "mmc: --check: %s: cannot read\n", name);
+    return 1;
+  }
+  crlf_to_lf(text, &len);
+  memset(&c, 0, sizeof(c));
+  c.file = name;
+  vec_init(&c.funcs);
+  vec_init(&c.missing);
+  vec_init(&progs);
+  /* first pass: every function the file defines */
+  p = parse_new(text, name, 1);
+  parse_set_check(p, 1);
+  {
+    Node *n;
+    while ((r = parse_next(p, &n)) == P_OK) collect_funcs(&c, n);
+  }
+  if (r == P_ERROR || r == P_INCOMPLETE) c.problems++;
+  parse_free(p);
+  /* second pass: the commands */
+  if (c.problems == 0) {
+    Node *n;
+    p = parse_new(text, name, 1);
+    parse_set_check(p, 1);
+    while ((r = parse_next(p, &n)) == P_OK) check_node(&c, n);
+    parse_free(p);
+  }
+  for (i = 0; i < len; i++)
+    if (text[i] == '\n') lines++;
+  if (c.problems == 0) fd_printf(1, "%s: OK (%d lines)\n", name, lines);
+  else fd_printf(1, "%s: %d problem%s\n", name, c.problems, c.problems == 1 ? "" : "s");
+  vec_free(&c.funcs);
+  vec_free(&c.missing);
+  vec_free(&progs);
+  free(text);
+  return c.problems ? 1 : 0;
+}
+
+/* }================================================================== */
 
 
 static int usage (int fd) {
   fd_printf(fd,
-    "%s %s - portable shell by %s\n\n"
+    "%s %s - portable shell by %s (bash compatible)\n\n"
     "usage: %s [options] [script [args...]]\n"
-    "  (nothing)      start the interactive shell in the current folder\n"
-    "  -c 'command'   run one command line and exit\n"
-    "  script         run the commands in a file\n"
-    "  --root DIR     use DIR as the MMC folder instead of the program's\n"
-    "  --version      print the version\n"
-    "  --help         this text\n",
+    "  (nothing)        start the interactive shell in the current folder\n"
+    "  -c 'command'     run one command line and exit ($0 $1 ... may follow)\n"
+    "  -s               read commands from standard input\n"
+    "  script           run the commands in a file\n"
+    "  -e -u -x -o opt  set options, as with 'set' (-o pipefail ...)\n"
+    "  -n               read the commands, run nothing (syntax check)\n"
+    "  --check file...  check scripts: syntax, and commands that do not exist\n"
+    "  --norc           do not read ~/.mmcrc\n"
+    "  --noprofile      do not read /etc/profile\n"
+    "  --root DIR       use DIR as the MMC folder instead of the program's\n"
+    "  --version        print the version\n"
+    "  --help           this text\n",
     MMC_NAME, MMC_VERSION, MMC_AUTHOR, MMC_NAME);
   return fd == 1 ? 0 : 2;
 }
 
 
 int main (int argc, char **argv) {
-  const char *command = NULL, *root = NULL;
-  char *lvl, *cwd, *exedir;
-  int i, top_level;
+  const char *command = NULL, *root = NULL, *stage_file = NULL;
+  long stage_pid = 0;
+  char *cwd, *exedir;
+  int i, top_level, norc = 0, noprofile = 0, from_stdin = 0, check = 0, force_i = 0;
+  int have_script = 0;
+  Vec setopts;	/* -e -x -o pipefail ... applied after setup */
   os_args(&argc, &argv);
-  vec_init(&sh_args);
+  vec_init(&sh_pos);
+  vec_init(&setopts);
+  sh_init_fds();
   for (i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--version") == 0) {
-      fd_printf(1, "%s %s\n", MMC_NAME, MMC_VERSION);
+    const char *a = argv[i];
+    if (strcmp(a, "--version") == 0) {
+      fd_printf(1, "%s %s (bash %s compatible)\n", MMC_NAME, MMC_VERSION, MMC_BASH_COMPAT);
       return 0;
     }
-    else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
-      return usage(1);
-    else if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) root = argv[++i];
-    else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) command = argv[++i];
-    else if (strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "-i") == 0 ||
-             strcmp(argv[i], "--login") == 0)
-      ;	/* accepted for bash compatibility */
-    else if (argv[i][0] == '-' && argv[i][1] != '\0') return usage(2);
+    else if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) return usage(1);
+    else if (strcmp(a, "--root") == 0 && i + 1 < argc) root = argv[++i];
+    else if (strcmp(a, "--stage") == 0 && i + 2 < argc) {
+      stage_file = argv[++i];
+      stage_pid = atol(argv[++i]);
+    }
+    else if (strcmp(a, "--check") == 0) {
+      check = 1;
+      i++;
+      break;
+    }
+    else if (strcmp(a, "--norc") == 0) norc = 1;
+    else if (strcmp(a, "--noprofile") == 0) noprofile = 1;
+    else if (strcmp(a, "--login") == 0 || strcmp(a, "-l") == 0) sh_login = 1;
+    else if (strcmp(a, "--posix") == 0) vec_push(&setopts, xstrdup("-oposix"));
+    else if (strcmp(a, "--") == 0 || strcmp(a, "-") == 0) {
+      i++;
+      break;
+    }
+    else if (strcmp(a, "-c") == 0) {
+      if (i + 1 >= argc) {
+        fd_puts(2, "mmc: -c: option requires an argument\n");
+        return 2;
+      }
+      command = argv[++i];
+    }
+    else if (strcmp(a, "-o") == 0 || strcmp(a, "+o") == 0) {
+      if (i + 1 < argc) vec_push(&setopts, xstrcat3(a[0] == '-' ? "-o" : "+o", argv[++i], ""));
+    }
+    else if ((a[0] == '-' || a[0] == '+') && a[1] != '\0' && a[1] != '-') {
+      const char *p;
+      for (p = a + 1; *p; p++) {
+        if (*p == 'c' && a[0] == '-') {	/* -ec 'cmd' */
+          if (i + 1 >= argc) return usage(2);
+          command = argv[++i];
+        }
+        else if (*p == 's') from_stdin = 1;
+        else if (*p == 'i') force_i = 1;
+        else if (*p == 'l') sh_login = 1;
+        else {
+          char opt[3];
+          opt[0] = a[0];
+          opt[1] = *p;
+          opt[2] = '\0';
+          vec_push(&setopts, xstrdup(opt));
+        }
+      }
+    }
+    else if (a[0] == '-' && a[1] == '-') {
+      fd_printf(2, "mmc: %s: invalid option\n", a);
+      return usage(2);
+    }
     else break;
   }
   os_init();
-  if (command != NULL) vec_push(&sh_args, xstrdup(MMC_NAME));
-  for (; i < argc; i++) vec_push(&sh_args, xstrdup(argv[i]));
-  lvl = os_getenv("MMC_LEVEL");
-  top_level = (lvl == NULL);
-  free(lvl);
+  if (command != NULL) {	/* -c 'cmd' [name [args]] */
+    vec_push(&sh_pos, xstrdup(i < argc ? argv[i++] : MMC_NAME));
+    for (; i < argc; i++) vec_push(&sh_pos, xstrdup(argv[i]));
+  }
+  else if (check || stage_file) {
+    vec_push(&sh_pos, xstrdup(MMC_NAME));
+  }
+  else if (from_stdin) {
+    vec_push(&sh_pos, xstrdup(MMC_NAME));
+    for (; i < argc; i++) vec_push(&sh_pos, xstrdup(argv[i]));
+  }
+  else {
+    have_script = i < argc;
+    for (; i < argc; i++) vec_push(&sh_pos, xstrdup(argv[i]));	/* script args */
+  }
+  var_init();
+  top_level = var_get("MMC_LEVEL") == NULL;
   setup_root(argv[0], root);
   setup_env();
   setup_tree();
-  sh_interactive = (command == NULL && sh_args.n == 0 && os_is_tty(0));
-  source_config(top_level);
-  if (command != NULL) sh_run_line(command);
-  else if (sh_args.n > 0) {
-    char *native = path_to_native(sh_args.v[0]);
-    sh_status = sh_source(native, 1);
+  sh_pid = os_getpid();
+  setup_shell_vars();
+  if (stage_file != NULL) {	/* a pipeline stage or & job of a parent mmc */
+    int st = sh_stage_main(stage_file, stage_pid);
+    os_shutdown();
+    return st & 0xFF;
+  }
+  if (check) {
+    int status = 0;
+    char *etc = path_join(path_root(), "etc");
+    char *profile = path_join(etc, "profile");
+    sh_source(profile, 0, NULL, 0);	/* PATH from the profile, to find commands */
+    free(etc);
+    free(profile);
+    if (i >= argc) {
+      fd_puts(2, "mmc: --check: which files?\n");
+      return 2;
+    }
+    for (; i < argc; i++)
+      if (check_file(argv[i]) != 0) status = 1;
+    return status;
+  }
+  sh_interactive = force_i || (command == NULL && !have_script && os_is_tty(0) && !from_stdin);
+  if (sh_interactive) opt_set("monitor", 1);
+  opt_set("expand_aliases", sh_interactive);	/* bash: scripts do not expand aliases */
+  if (sh_login) opt_set("login_shell", 1);
+  if (sh_pos.n == 0) vec_push(&sh_pos, xstrdup(MMC_NAME));
+  source_config(top_level, norc, noprofile);
+  {	/* -e -x -o pipefail ... from the command line */
+    size_t k;
+    for (k = 0; k < setopts.n; k++) {
+      const char *o = setopts.v[k];
+      if (o[1] == 'o') opt_set(o + 2, o[0] == '-');
+      else opt_letter(o[1], o[0] == '-');
+    }
+    vec_free(&setopts);
+  }
+  if (command != NULL) {
+    sh_run_string(command, MMC_NAME, 1);
+  }
+  else if (have_script) {
+    char *native = path_to_native(sh_pos.v[0]);
+    OsStat st;
+    if (os_stat(native, &st) != 0) {
+      fd_printf(2, "mmc: %s: No such file or directory\n", sh_pos.v[0]);
+      free(native);
+      os_shutdown();
+      return 127;
+    }
+    sh_status = sh_run_script(native);
     free(native);
   }
   else {
     /* started from its own folder (double click): go home instead */
     cwd = os_getcwd();
     exedir = path_dirname(g_exe);
-    if (sh_interactive && m_fncmp(cwd, exedir) == 0) os_chdir(g_home);
+    if (sh_interactive && m_fncmp(cwd, exedir) == 0) {
+      char *shown;
+      os_chdir(g_home);
+      shown = path_to_display(g_home);
+      var_set("PWD", shown);
+      free(shown);
+    }
     free(cwd);
     free(exedir);
     repl();
   }
+  sh_exit_now(sh_status);
   os_shutdown();
   return sh_status & 0xFF;
 }

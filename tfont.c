@@ -1,11 +1,17 @@
 /*
 ** tfont.c - fonts of mmc-term
 **
-** Finds a monospace font file on the system, rasterizes glyphs with
-** stb_truetype and caches them. Missing glyphs come from fallback
-** fonts; bold and italic are synthesized when the font has no file
-** for them. The same code runs on every system, so text looks the
-** same everywhere.
+** Finds a monospace font file on the system and caches its glyphs.
+** Missing glyphs come from fallback fonts; bold and italic are
+** synthesized when the font has no file for them.
+**
+** Two rasterizers:
+**   stb_truetype   every system; unhinted, the same picture everywhere
+**   GDI            Windows (font_smoothing=cleartype|gray, the default):
+**                  hinted and ClearType filtered like every other Windows
+**                  program - this is what makes git-bash's mintty sharp
+**                  and smooth at small sizes. stb_truetype still decides
+**                  which font file has a glyph, GDI only draws it.
 */
 
 #include "mterm.h"
@@ -28,12 +34,24 @@
 #pragma GCC diagnostic pop
 #endif
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
+
+#define ST_BOLD		1
+#define ST_ITALIC	2
 
 typedef struct Face {
   unsigned char *data;	/* the font file; shared by faces of one .ttc */
   stbtt_fontinfo info;
   float scale;
   int ok;
+#ifdef _WIN32
+  wchar_t family[LF_FACESIZE];	/* name GDI knows the font by */
+  HFONT hf[4];	/* GDI font per ST_* style, for the current size */
+#endif
 } Face;
 
 typedef struct Known {
@@ -41,8 +59,13 @@ typedef struct Known {
   int ttc_bold, ttc_italic;	/* face index inside a .ttc, 0 = none */
 } Known;
 
+/* a name may appear twice: the first entry whose file exists wins */
 static const Known known[] = {
+  {"Hack", "HackNerdFontMono-Regular.ttf", "HackNerdFontMono-Bold.ttf",
+   "HackNerdFontMono-Italic.ttf", 0, 0},
   {"Hack", "Hack-Regular.ttf", "Hack-Bold.ttf", "Hack-Italic.ttf", 0, 0},
+  {"Hack Nerd Font Mono", "HackNerdFontMono-Regular.ttf",
+   "HackNerdFontMono-Bold.ttf", "HackNerdFontMono-Italic.ttf", 0, 0},
   {"Cascadia Mono", "CascadiaMono.ttf", NULL, NULL, 0, 0},
   {"Cascadia Code", "CascadiaCode.ttf", NULL, NULL, 0, 0},
   {"Consolas", "consola.ttf", "consolab.ttf", "consolai.ttf", 0, 0},
@@ -64,8 +87,9 @@ static const Known known[] = {
   {NULL, NULL, NULL, NULL, 0, 0}
 };
 
-/* looked at in this order when the config names no font; Hack comes with
-** mmc (usr/share/fonts), the others are what each system has */
+/* looked at in this order when the config names no font; Hack (the Nerd
+** Font version, with the Powerline and icon glyphs) comes with mmc in
+** usr/share/fonts, the others are what each system has */
 static const char *const preferred[] = {
   "Hack",
 #if defined(_WIN32)
@@ -78,8 +102,10 @@ static const char *const preferred[] = {
   "JetBrains Mono", "Courier New", NULL
 };
 
-/* fonts asked for glyphs the main font does not have */
+/* fonts asked for glyphs the main font does not have; the Nerd Font
+** first, so the icons work whatever the main font is */
 static const char *const fallback_files[] = {
+  "HackNerdFontMono-Regular.ttf",
 #if defined(_WIN32)
   "seguisym.ttf", "segoeui.ttf", "msgothic.ttc", "malgun.ttf", "msyh.ttc",
   "seguiemj.ttf",
@@ -104,6 +130,7 @@ static int fallback_state[MAX_FALLBACK];	/* 0 not tried, 1 loaded, -1 none */
 static char name_buf[160];
 static float cur_px = 15.0f;
 static int cell_w = 8, cell_h = 16, ascent = 12;
+static int smoothing = SMOOTH_STB;
 
 
 /*
@@ -191,6 +218,199 @@ void font_add_dir (const char *native) {
 /* }================================================================== */
 
 
+#ifdef _WIN32
+
+/*
+** {==================================================================
+** GDI: hinted, ClearType (or gray) glyphs, the way Windows draws text
+** ===================================================================
+*/
+
+static HDC gdc = NULL;
+static HBITMAP gbmp = NULL;
+static uint32_t *gbits = NULL;
+static int gw = 0, gh = 0;
+
+
+static int use_gdi (void) {
+  return smoothing != SMOOTH_STB;
+}
+
+
+/* the family name from the font's own 'name' table (UTF-16 big endian) */
+static void face_family (Face *f) {
+  int len = 0, i, n;
+  const char *s;
+  f->family[0] = L'\0';
+  if (!f->ok) return;
+  s = stbtt_GetFontNameString(&f->info, &len, STBTT_PLATFORM_ID_MICROSOFT,
+                              STBTT_MS_EID_UNICODE_BMP, STBTT_MS_LANG_ENGLISH, 1);
+  if (s == NULL) return;
+  n = len / 2;
+  if (n > LF_FACESIZE - 1) n = LF_FACESIZE - 1;
+  for (i = 0; i < n; i++)
+    f->family[i] = (wchar_t)(((unsigned char)s[2 * i] << 8) | (unsigned char)s[2 * i + 1]);
+  f->family[n] = L'\0';
+}
+
+
+/* the font file becomes usable by name, for this program only */
+static void face_register (Face *f, const char *file) {
+  wchar_t w[1024];
+  if (MultiByteToWideChar(CP_UTF8, 0, file, -1, w, 1024) > 0)
+    AddFontResourceExW(w, FR_PRIVATE, 0);
+  face_family(f);
+}
+
+
+static void face_drop_gdi (Face *f) {
+  int i;
+  for (i = 0; i < 4; i++) {
+    if (f->hf[i] != NULL) DeleteObject(f->hf[i]);
+    f->hf[i] = NULL;
+  }
+}
+
+
+static HFONT face_hfont (Face *f, int style) {
+  LOGFONTW lf;
+  if (f->hf[style] != NULL) return f->hf[style];
+  memset(&lf, 0, sizeof(lf));
+  lf.lfHeight = -(LONG)floor(cur_px + 0.5f);	/* negative: the em size */
+  lf.lfWeight = (style & ST_BOLD) ? FW_BOLD : FW_NORMAL;
+  lf.lfItalic = (style & ST_ITALIC) ? TRUE : FALSE;
+  lf.lfCharSet = DEFAULT_CHARSET;
+  lf.lfOutPrecision = OUT_TT_ONLY_PRECIS;
+  lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
+  lf.lfQuality = (smoothing == SMOOTH_GRAY) ? ANTIALIASED_QUALITY : CLEARTYPE_QUALITY;
+  lf.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
+  wcsncpy(lf.lfFaceName, f->family, LF_FACESIZE - 1);
+  f->hf[style] = CreateFontIndirectW(&lf);
+  return f->hf[style];
+}
+
+
+static int canvas (int w, int h) {
+  BITMAPINFO bi;
+  HBITMAP b;
+  void *bits = NULL;
+  if (gdc == NULL && (gdc = CreateCompatibleDC(NULL)) == NULL) return 0;
+  if (w <= gw && h <= gh) return 1;
+  if (w < gw) w = gw;
+  if (h < gh) h = gh;
+  memset(&bi, 0, sizeof(bi));
+  bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+  bi.bmiHeader.biWidth = w;
+  bi.bmiHeader.biHeight = -h;	/* top row first */
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  b = CreateDIBSection(gdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+  if (b == NULL) return 0;
+  SelectObject(gdc, b);
+  if (gbmp != NULL) DeleteObject(gbmp);
+  gbmp = b;
+  gbits = (uint32_t *)bits;
+  gw = w;
+  gh = h;
+  SetBkMode(gdc, TRANSPARENT);
+  SetTextAlign(gdc, TA_BASELINE | TA_LEFT | TA_NOUPDATECP);
+  return 1;
+}
+
+
+/* cell size from the hinted metrics, so the grid matches what GDI draws */
+static int gdi_metrics (void) {
+  TEXTMETRICW tm;
+  SIZE sz;
+  HFONT hf;
+  int extra;
+  if (!canvas(8, 8) || (hf = face_hfont(&f_regular, 0)) == NULL) return 0;
+  SelectObject(gdc, hf);
+  if (!GetTextMetricsW(gdc, &tm) || !GetTextExtentPoint32W(gdc, L"M", 1, &sz))
+    return 0;
+  extra = (tm.tmHeight + 6) / 12;	/* a little air between lines */
+  cell_w = sz.cx > 0 ? sz.cx : 1;
+  cell_h = tm.tmHeight + extra;
+  ascent = tm.tmAscent + extra / 2;
+  return 1;
+}
+
+
+/*
+** Draws one glyph with GDI and reads the coverage back. Light text is
+** drawn white on black, dark text black on white (and inverted): GDI
+** tunes ClearType for the colors, so both come out right.
+*/
+static int gdi_glyph (Face *f, uint32_t cp, int style, int dark, int span,
+                      Glyph *g) {
+  wchar_t wc[2];
+  int n = 1, pad = cell_h, w = cell_w * 2 + 2 * pad, h = cell_h + 2 * pad;
+  int x0 = w, y0 = h, x1 = -1, y1 = -1, x, y, x_at;
+  uint32_t paper = dark ? 0xFFFFFFu : 0u;
+  HFONT hf = face_hfont(f, style);
+  if (hf == NULL || !canvas(w, h)) return 0;
+  if (cp >= 0x10000) {	/* UTF-16 surrogate pair */
+    wc[0] = (wchar_t)(0xD800 + ((cp - 0x10000) >> 10));
+    wc[1] = (wchar_t)(0xDC00 + ((cp - 0x10000) & 0x3FF));
+    n = 2;
+  }
+  else wc[0] = (wchar_t)cp;
+  for (y = 0; y < h; y++)
+    for (x = 0; x < w; x++) gbits[(size_t)y * (size_t)gw + (size_t)x] = paper;
+  SelectObject(gdc, hf);
+  SetTextColor(gdc, dark ? RGB(0, 0, 0) : RGB(255, 255, 255));
+  x_at = pad;
+  if (span > 0) {	/* a fallback font is not monospace: center it */
+    SIZE sz;
+    if (GetTextExtentPoint32W(gdc, wc, n, &sz)) x_at += (span - sz.cx) / 2;
+  }
+  ExtTextOutW(gdc, x_at, pad + ascent, 0, NULL, wc, (UINT)n, NULL);
+  GdiFlush();
+  for (y = 0; y < h; y++) {
+    const uint32_t *row = gbits + (size_t)y * (size_t)gw;
+    for (x = 0; x < w; x++) {
+      if ((row[x] & 0xFFFFFFu) == paper) continue;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+  }
+  memset(g, 0, sizeof(*g));
+  if (x1 < 0) return 1;	/* a space */
+  g->w = x1 - x0 + 1;
+  g->h = y1 - y0 + 1;
+  g->xoff = x0 - pad;
+  g->yoff = y0 - (pad + ascent);
+  g->lcd = (smoothing == SMOOTH_CLEARTYPE) ? 1 : 2;
+  g->bm = (unsigned char *)xmalloc((size_t)g->w * (size_t)g->h * (g->lcd == 1 ? 3u : 1u));
+  for (y = 0; y < g->h; y++) {
+    const uint32_t *row = gbits + (size_t)(y0 + y) * (size_t)gw + (size_t)x0;
+    for (x = 0; x < g->w; x++) {
+      uint32_t p = dark ? ~row[x] : row[x];
+      int r = (int)((p >> 16) & 0xFF), gg = (int)((p >> 8) & 0xFF), b = (int)(p & 0xFF);
+      size_t at = (size_t)y * (size_t)g->w + (size_t)x;
+      if (g->lcd == 1) {
+        g->bm[at * 3] = (unsigned char)r;
+        g->bm[at * 3 + 1] = (unsigned char)gg;
+        g->bm[at * 3 + 2] = (unsigned char)b;
+      }
+      else g->bm[at] = (unsigned char)((r + gg + gg + b) / 4);
+    }
+  }
+  return 1;
+}
+
+/* }================================================================== */
+
+#else
+
+static int use_gdi (void) { return 0; }
+
+#endif
+
+
 static int face_open (Face *f, unsigned char *data, int index) {
   int off = stbtt_GetFontOffsetForIndex(data, index);
   memset(f, 0, sizeof(*f));
@@ -215,6 +435,9 @@ static int face_load (Face *f, const char *file, int index) {
     free(data);
     return 0;
   }
+#ifdef _WIN32
+  face_register(f, file);
+#endif
   return 1;
 }
 
@@ -226,23 +449,40 @@ static int load_known (const Known *k) {
   else face_load(&f_bold, find_file(k->bold), 0);
   if (k->ttc_italic) face_open(&f_italic, f_regular.data, k->ttc_italic);
   else face_load(&f_italic, find_file(k->italic), 0);
+#ifdef _WIN32
+  if (k->ttc_bold) face_family(&f_bold);	/* faces inside a .ttc */
+  if (k->ttc_italic) face_family(&f_italic);
+#endif
   strncpy(name_buf, k->name, sizeof(name_buf) - 1);
   return 1;
 }
 
 
-static const Known *known_by_name (const char *name) {
+/* every entry with that name, until one loads */
+static int load_by_name (const char *name) {
   const Known *k;
   for (k = known; k->name; k++)
-    if (m_stricmp(k->name, name) == 0) return k;
-  return NULL;
+    if (m_stricmp(k->name, name) == 0 && load_known(k)) return 1;
+  return 0;
+}
+
+
+static int is_known_name (const char *name) {
+  const Known *k;
+  for (k = known; k->name; k++)
+    if (m_stricmp(k->name, name) == 0) return 1;
+  return 0;
 }
 
 
 int font_init (const Config *c) {
-  const Known *k;
   size_t i;
   name_buf[0] = '\0';
+#ifdef _WIN32
+  smoothing = c->smoothing;
+#else
+  smoothing = SMOOTH_STB;
+#endif
   if (c->font_file[0] != '\0') {	/* an explicit file wins */
     char *native = path_to_native(c->font_file);
     int ok = face_load(&f_regular, native, 0);
@@ -250,7 +490,7 @@ int font_init (const Config *c) {
     if (ok) strncpy(name_buf, path_basename(c->font_file), sizeof(name_buf) - 1);
   }
   if (!f_regular.ok && c->font[0] != '\0') {
-    if ((k = known_by_name(c->font)) != NULL) load_known(k);
+    if (is_known_name(c->font)) load_by_name(c->font);
     else {	/* maybe it is a file name, with or without ".ttf" */
       char *guess = xstrcat3(c->font, ".ttf", "");
       const char *file = find_file(c->font);
@@ -261,7 +501,7 @@ int font_init (const Config *c) {
     }
   }
   for (i = 0; !f_regular.ok && preferred[i] != NULL; i++)
-    load_known(known_by_name(preferred[i]));
+    load_by_name(preferred[i]);
   if (!f_regular.ok) {	/* last resort: anything that says "mono" */
     list_fonts();
     for (i = 0; i < font_files.n && !f_regular.ok; i++) {
@@ -278,6 +518,9 @@ int font_init (const Config *c) {
     }
   }
   if (!f_regular.ok) return -1;
+#ifdef _WIN32
+  if (f_regular.family[0] == L'\0') smoothing = SMOOTH_STB;	/* GDI cannot name it */
+#endif
   font_set_px(cur_px);
   return 0;
 }
@@ -342,21 +585,9 @@ static Slot *cache_insert (uint32_t key) {
 /* }================================================================== */
 
 
-void font_set_px (float px) {
-  int asc, desc, gap, adv, lsb, i;
-  float s, height;
-  if (px < 6.0f) px = 6.0f;
-  cur_px = px;
-  cache_clear();
-  if (!f_regular.ok) return;
-  s = stbtt_ScaleForMappingEmToPixels(&f_regular.info, px);
-  f_regular.scale = s;
-  if (f_bold.ok) f_bold.scale = stbtt_ScaleForMappingEmToPixels(&f_bold.info, px);
-  if (f_italic.ok)
-    f_italic.scale = stbtt_ScaleForMappingEmToPixels(&f_italic.info, px);
-  for (i = 0; i < MAX_FALLBACK; i++)
-    if (f_fallback[i].ok)
-      f_fallback[i].scale = stbtt_ScaleForMappingEmToPixels(&f_fallback[i].info, px);
+static void stb_metrics (void) {
+  int asc, desc, gap, adv, lsb;
+  float s = f_regular.scale, height;
   stbtt_GetFontVMetrics(&f_regular.info, &asc, &desc, &gap);
   stbtt_GetCodepointHMetrics(&f_regular.info, 'M', &adv, &lsb);
   height = (float)(asc - desc + gap) * s;
@@ -364,6 +595,33 @@ void font_set_px (float px) {
   cell_w = (int)floor((float)adv * s + 0.5f);
   if (cell_w < 1) cell_w = 1;
   ascent = (int)floor((float)asc * s + ((float)cell_h - height) * 0.5f + 0.5f);
+}
+
+
+void font_set_px (float px) {
+  int i;
+  if (px < 6.0f) px = 6.0f;
+  cur_px = px;
+  cache_clear();
+  if (!f_regular.ok) return;
+  f_regular.scale = stbtt_ScaleForMappingEmToPixels(&f_regular.info, px);
+  if (f_bold.ok) f_bold.scale = stbtt_ScaleForMappingEmToPixels(&f_bold.info, px);
+  if (f_italic.ok)
+    f_italic.scale = stbtt_ScaleForMappingEmToPixels(&f_italic.info, px);
+  for (i = 0; i < MAX_FALLBACK; i++)
+    if (f_fallback[i].ok)
+      f_fallback[i].scale = stbtt_ScaleForMappingEmToPixels(&f_fallback[i].info, px);
+#ifdef _WIN32
+  face_drop_gdi(&f_regular);
+  face_drop_gdi(&f_bold);
+  face_drop_gdi(&f_italic);
+  for (i = 0; i < MAX_FALLBACK; i++) face_drop_gdi(&f_fallback[i]);
+  if (use_gdi()) {
+    if (gdi_metrics()) return;
+    smoothing = SMOOTH_STB;	/* GDI failed: stay with stb_truetype */
+  }
+#endif
+  stb_metrics();
 }
 
 
@@ -429,14 +687,16 @@ static void slant (Glyph *g) {
 }
 
 
-const Glyph *font_glyph (uint32_t cp, int bold, int italic) {
+const Glyph *font_glyph (uint32_t cp, int bold, int italic, int dark) {
   uint32_t key = (cp & 0x1FFFFF) | (bold ? 1u << 24 : 0) |
                  (italic ? 1u << 25 : 0) | (1u << 31);
-  Slot *s = cache_find(key);
+  Slot *s;
   Face *f = &f_regular;
-  int glyph, fake_bold = bold, fake_italic = italic;
+  int glyph, fake_bold = bold, fake_italic = italic, fallback = 0;
   int x0, y0, x1, y1, adv, lsb, span;
   Glyph *g;
+  if (use_gdi() && dark) key |= 1u << 26;	/* GDI tunes by color */
+  s = cache_find(key);
   if (s != NULL && s->key == key) return &s->g;
   s = cache_insert(key);
   g = &s->g;
@@ -454,13 +714,27 @@ const Glyph *font_glyph (uint32_t cp, int bold, int italic) {
   glyph = stbtt_FindGlyphIndex(&f->info, (int)cp);
   if (glyph == 0) {
     Face *fb = fallback_for(cp, &glyph);
-    if (fb != NULL) f = fb;
+    if (fb != NULL) {
+      f = fb;
+      fallback = 1;
+    }
     else {	/* nobody has it: show the replacement character */
       f = &f_regular;
-      glyph = stbtt_FindGlyphIndex(&f->info, 0xFFFD);
-      if (glyph == 0) glyph = stbtt_FindGlyphIndex(&f->info, '?');
+      cp = stbtt_FindGlyphIndex(&f->info, 0xFFFD) ? 0xFFFD : '?';
+      glyph = stbtt_FindGlyphIndex(&f->info, (int)cp);
     }
   }
+  span = cell_w * (grid_wcwidth(cp) == 2 ? 2 : 1);
+#ifdef _WIN32
+  if (use_gdi()) {
+    /* GDI picks the bold/italic file of the family itself, or makes it */
+    Face *gf = (f == &f_bold || f == &f_italic) ? &f_regular : f;
+    int style = (bold ? ST_BOLD : 0) | (italic ? ST_ITALIC : 0);
+    if (gf->family[0] != L'\0' &&
+        gdi_glyph(gf, cp, style, dark, fallback ? span : 0, g))
+      return g;
+  }
+#endif
   stbtt_GetGlyphBitmapBox(&f->info, glyph, f->scale, f->scale, &x0, &y0, &x1, &y1);
   g->w = x1 - x0;
   g->h = y1 - y0;
@@ -473,10 +747,8 @@ const Glyph *font_glyph (uint32_t cp, int bold, int italic) {
   g->bm = (unsigned char *)xmalloc((size_t)g->w * (size_t)g->h);
   stbtt_MakeGlyphBitmap(&f->info, g->bm, g->w, g->h, g->w, f->scale, f->scale,
                         glyph);
-  if (f != &f_regular && f != &f_bold && f != &f_italic) {
-    /* a fallback font is not monospace: center it in its cell(s) */
+  if (fallback) {	/* a fallback font is not monospace: center it in its cell(s) */
     stbtt_GetGlyphHMetrics(&f->info, glyph, &adv, &lsb);
-    span = cell_w * (grid_wcwidth(cp) == 2 ? 2 : 1);
     g->xoff += (span - (int)((float)adv * f->scale)) / 2;
   }
   if (fake_bold) embolden(g);

@@ -1,0 +1,5 @@
+empty: e f r
+full: e f s r
+dir: e d r
+missing:
+status: 0

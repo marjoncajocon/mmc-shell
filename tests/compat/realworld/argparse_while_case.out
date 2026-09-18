@@ -1,0 +1,9 @@
+verbose=2 output=out.bin target=debug files=3
+  file: a.c
+  file: b c.c
+  file: -weird.c
+verbose=0 output=x.o target=release files=1
+  file: z.c
+usage: build [-v] [-o FILE] [--target=T] files...
+status 2
+status: 0

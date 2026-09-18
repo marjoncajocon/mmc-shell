@@ -1,0 +1,4 @@
+inner sees x=outer-local
+outer now x=changed
+global x=global
+status: 0
