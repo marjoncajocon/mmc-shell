@@ -1,0 +1,22 @@
+# build output
+/mmc
+/mmc.exe
+/mmc-shell.exe
+/dist/
+*.pdb
+*.o
+*.obj
+
+# the tree mmc creates when it is run from this folder
+/home/
+/usr/
+/etc/
+/tmp/
+
+# editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
