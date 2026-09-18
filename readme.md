@@ -66,6 +66,8 @@ for x86_64 and aarch64, from any of the three systems.
 | `mpath.c` | Linux style paths on Windows (`/d/env` = `D:\env`) |
 | `mos.c` | everything that differs between Windows and Linux/macOS |
 | `mutil.c` | memory, string buffer, string vector |
+| `mmc.rc`, `mmc.ico` | Windows only: the program icon and version details |
+| `logo/` | the logo as SVG (`10-diamond-m-monogram.svg` is the one in use) and the other candidates |
 
 ## Install on Windows
 

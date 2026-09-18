@@ -19,7 +19,7 @@ mmc: $(SRC) mmc.h
 cross: $(SRC) mmc.h
 	mkdir -p dist
 	for t in x86_64 aarch64; do \
-	  $(ZIG) cc $(CFLAGS) -s -target $$t-windows-gnu -o dist/mmc-shell-$$t-windows.exe $(SRC) -lshell32 || exit 1; \
+	  $(ZIG) cc $(CFLAGS) -s -target $$t-windows-gnu -o dist/mmc-shell-$$t-windows.exe $(SRC) mmc.rc -lshell32 || exit 1; \
 	  $(ZIG) cc $(CFLAGS) -s -target $$t-linux-musl -static -o dist/mmc-$$t-linux $(SRC) || exit 1; \
 	  $(ZIG) cc $(CFLAGS) -s -target $$t-macos -o dist/mmc-$$t-macos $(SRC) || exit 1; \
 	done
