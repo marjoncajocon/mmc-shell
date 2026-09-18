@@ -214,7 +214,7 @@ typedef struct Frame {
   int w, h;
 } Frame;
 
-#define MENU_MAX	12
+#define MENU_MAX	16
 
 typedef struct Menu {
   int open, x, y, w, h, hot, n;

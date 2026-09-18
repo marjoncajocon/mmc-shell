@@ -470,8 +470,9 @@ void win_set_chrome (uint32_t bg, uint32_t border, uint32_t text, int dark) {
 
 
 void win_set_opacity (int percent) {
-  if (window != NULL && percent < 100)
-    ((MsgDouble)R.objc_msgSend)(window, SELN("setAlphaValue:"), (double)percent / 100.0);
+  if (window != NULL)
+    ((MsgDouble)R.objc_msgSend)(window, SELN("setAlphaValue:"),
+                                (double)(percent > 100 ? 100 : percent) / 100.0);
 }
 
 

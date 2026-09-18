@@ -14,7 +14,7 @@
 
 
 enum { M_COPY = 1, M_PASTE, M_SELECT_ALL, M_THEME, M_BIGGER, M_SMALLER,
-       M_NEW_WINDOW, M_ABOUT };
+       M_MORE_CLEAR, M_LESS_CLEAR, M_NEW_WINDOW, M_ABOUT };
 
 static struct {
   AppArgs args;
@@ -276,6 +276,21 @@ static void about (void) {
   win_message("About " TERM_NAME, text);
 }
 
+/* see-through window: 30 .. 100 percent, remembered in the config file */
+static void change_opacity (int delta) {
+  char value[16];
+  int o = A.cfg.opacity + delta;
+  if (o > 100) o = 100;
+  if (o < 30) o = 30;
+  A.cfg.opacity = o;
+  win_set_opacity(o);
+  sprintf(value, "%d", o);
+  if (A.conf != NULL) config_set_key(A.conf, "opacity", value);
+  sprintf(A.pill, "opacity %d%%", o);
+  A.pill_until = A.now + 900;
+  touch();
+}
+
 /* }================================================================== */
 
 
@@ -306,6 +321,8 @@ static void menu_open (int x, int y) {
   menu_add(A.theme.dark ? "Light theme" : "Dark theme", "Ctrl+Shift+T", M_THEME);
   menu_add("Bigger text", "Ctrl +", M_BIGGER);
   menu_add("Smaller text", "Ctrl -", M_SMALLER);
+  menu_add("More transparent", "Ctrl+Shift+wheel", M_MORE_CLEAR);
+  menu_add("Less transparent", NULL, M_LESS_CLEAR);
   menu_add(NULL, NULL, 0);
   menu_add("New window", "Ctrl+Shift+N", M_NEW_WINDOW);
   menu_add("About " TERM_NAME, NULL, M_ABOUT);
@@ -348,6 +365,8 @@ static void menu_do (int id) {
     case M_THEME: toggle_theme(); break;
     case M_BIGGER: zoom(1); break;
     case M_SMALLER: zoom(-1); break;
+    case M_MORE_CLEAR: change_opacity(-5); break;
+    case M_LESS_CLEAR: change_opacity(5); break;
     case M_NEW_WINDOW: new_window(); break;
     case M_ABOUT: about(); break;
     default: break;
@@ -579,7 +598,8 @@ void app_on_mouse (int type, int button, int x, int y, int mods, int arg) {
   A.mouse_x = x;
   A.mouse_y = y;
   if (type == TMS_WHEEL) {
-    if (mods & TM_CTRL) zoom(arg > 0 ? 1 : -1);
+    if ((mods & TM_CTRL) && (mods & TM_SHIFT)) change_opacity(arg > 0 ? 5 : -5);
+    else if (mods & TM_CTRL) zoom(arg > 0 ? 1 : -1);
     else if (A.g->alt) {	/* full screen programs get arrow keys */
       int n = arg > 0 ? arg : -arg;
       for (; n > 0; n--) send_csi(0, 0, arg > 0 ? 'A' : 'B');

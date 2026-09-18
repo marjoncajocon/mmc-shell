@@ -570,8 +570,9 @@ void win_set_chrome (uint32_t bg, uint32_t border, uint32_t text, int dark) {
 
 void win_set_opacity (int percent) {
   unsigned long v;
-  if (dpy == NULL || win == 0 || percent >= 100) return;
-  v = (unsigned long)(0xFFFFFFFFul / 100ul * (unsigned long)percent);
+  if (dpy == NULL || win == 0) return;
+  v = (percent >= 100) ? 0xFFFFFFFFul
+                       : (unsigned long)(0xFFFFFFFFul / 100ul * (unsigned long)percent);
   X.XChangeProperty(dpy, win, a_opacity, XA_CARDINAL, 32, PropModeReplace,
                     (const unsigned char *)&v, 1);
 }

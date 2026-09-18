@@ -582,7 +582,7 @@ void draw_scene (Frame *f, const Scene *s) {
     int px = (f->w - w) / 2, py = (f->h - h) / 2;
     fill_round(f, px - 1, py - 1, w + 2, h + 2, h / 2 + 1, t->accent1, 200);
     fill_round(f, px, py, w, h, h / 2, t->ui, 255);
-    draw_text(f, px + 18, py + 10, s->pill, t->ui_text, t->ui, 1);
+    draw_text(f, px + 18, py + 10, s->pill, t->ui_text, t->ui, 0);
   }
   if (s->menu != NULL && s->menu->open) draw_menu(f, s);
 }

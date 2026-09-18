@@ -119,6 +119,7 @@ mmc-term --theme light       dark or light, for this window only
 | wheel, Shift+PgUp / PgDn | scroll back (10 000 lines); Ctrl+Shift+Home / End: top / bottom |
 | Ctrl + / Ctrl - / Ctrl 0, Ctrl+wheel | bigger, smaller, normal text |
 | Ctrl+Shift+T | switch between the dark and the light theme (remembered) |
+| Ctrl+Shift+wheel | see-through window: opacity 30 .. 100 % in steps of 5 (remembered; also in the menu) |
 | F11 or Alt+Enter | full screen |
 | Ctrl+Shift+N | new window |
 | right click | menu |
