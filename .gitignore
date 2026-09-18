@@ -2,6 +2,10 @@
 /mmc
 /mmc.exe
 /mmc-shell.exe
+/mmc-term
+/mmc-term.exe
+/ttest
+/ttest.exe
 /dist/
 *.pdb
 *.o

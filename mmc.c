@@ -223,6 +223,23 @@ static char *git_branch (const char *cwd) {
 }
 
 
+#define LINE	"\033[0;94m"	/* the connector lines: the blue of the logo */
+
+/* MMC_PROMPT=classic in /etc/profile or ~/.mmcrc gives the one line prompt */
+static int prompt_is_classic (void) {
+  char *style = os_getenv("MMC_PROMPT");
+  int classic = style != NULL && strcmp(style, "classic") == 0;
+  free(style);
+  return classic;
+}
+
+
+static const char *prompt_last_line (void) {
+  return prompt_is_classic() ? "\033[32m$\033[0m "
+                             : LINE "└──╼ \033[1;33m$\033[0m ";
+}
+
+
 static void show_prompt_header (void) {
   char *cwd = os_getcwd();
   char *shown = path_to_display(cwd);
@@ -239,9 +256,20 @@ static void show_prompt_header (void) {
     buf_puts(&b, shown + hn);
   }
   else buf_puts(&b, shown);
-  fd_printf(1, "\033]0;MMC:%s\007\n\033[32m%s@%s \033[35mMMC \033[33m%s",
-            b.s, user ? user : "", host ? host : "", b.s);
-  if (branch) fd_printf(1, "\033[36m (%s)", branch);
+  fd_printf(1, "\033]0;MMC:%s\007\n", b.s);
+  if (prompt_is_classic()) {	/* one line, like git-bash */
+    fd_printf(1, "\033[32m%s@%s \033[0;7;34m MMC \033[0;1m %s",
+              user ? user : "", host ? host : "", b.s);
+    if (branch) fd_printf(1, "\033[0;36m (%s)", branch);
+  }
+  else {	/* connector lines and brackets, like Parrot OS, in blue */
+    fd_puts(1, LINE "┌─");
+    if (sh_status != 0) fd_puts(1, "[\033[1;31m✗" LINE "]─");
+    fd_printf(1, "[\033[1;92m%s\033[1;33m@\033[1;96m%s" LINE "]─[\033[1;94mMMC"
+                 LINE "]─[\033[0;32m%s" LINE "]",
+              user ? user : "", host ? host : "", b.s);
+    if (branch) fd_printf(1, "─[\033[0;36m%s" LINE "]", branch);
+  }
   fd_puts(1, "\033[0m\n");
   buf_free(&b);
   free(cwd); free(shown); free(home); free(user); free(host); free(branch);
@@ -250,13 +278,110 @@ static void show_prompt_header (void) {
 /* }================================================================== */
 
 
+/*
+** {==================================================================
+** Welcome banner: MMC in big letters, green like an old monitor, and
+** who made it. A file /etc/banner replaces the big letters (with a
+** picture, for example); an empty /etc/banner means no banner at all.
+** ===================================================================
+*/
+
+static const char *const banner_art[] = {
+  "███╗   ███╗ ███╗   ███╗  ██████╗",
+  "████╗ ████║ ████╗ ████║ ██╔════╝",
+  "██╔████╔██║ ██╔████╔██║ ██║     ",
+  "██║╚██╔╝██║ ██║╚██╔╝██║ ██║     ",
+  "██║ ╚═╝ ██║ ██║ ╚═╝ ██║ ╚██████╗",
+  "╚═╝     ╚═╝ ╚═╝     ╚═╝  ╚═════╝",
+  NULL
+};
+
+/* bright mint at the top, deep green at the bottom */
+static const unsigned char banner_rgb[][3] = {
+  {0xB6, 0xFF, 0xD6}, {0x7D, 0xF7, 0xB2}, {0x4C, 0xE8, 0x8E},
+  {0x22, 0xD3, 0x6B}, {0x17, 0xA8, 0x54}, {0x0F, 0x7D, 0x3E}
+};
+
+
+/* can this terminal show 24 bit colors? */
+static int has_truecolor (void) {
+#ifdef _WIN32
+  return 1;	/* the Windows 10+ console and Windows Terminal do */
+#else
+  char *ct = os_getenv("COLORTERM");
+  int yes = ct != NULL && (strstr(ct, "truecolor") || strstr(ct, "24bit"));
+  free(ct);
+  return yes;
+#endif
+}
+
+
+static void banner_lines (Buf *b) {
+  static const char *const mark = "  \033[32m[\033[1;92m+\033[0;32m]\033[0m ";
+  static const char *const sep = " \033[32m::\033[0m ";
+  buf_puts(b, mark);
+  buf_puts(b, "\033[1;92m" MMC_NAME " " MMC_VERSION "\033[0m");
+  buf_puts(b, sep);
+  buf_puts(b, "\033[32mportable shell\033[0m\n");
+  buf_puts(b, mark);
+  buf_puts(b, "\033[32mdeveloped by\033[0m");
+  buf_puts(b, sep);
+  buf_puts(b, "\033[1;92m" MMC_AUTHOR "\033[0m\n");
+  buf_puts(b, mark);
+  buf_puts(b, "\033[32mtype \033[1;92mhelp\033[0;32m for help, "
+              "\033[1;92mexit\033[0;32m to leave\033[0m\n");
+}
+
+
+static void show_banner (void) {
+  char *etc = path_join(path_root(), "etc");
+  char *file = path_join(etc, "banner");
+  size_t len = 0;
+  char *custom = read_file(file, &len);
+  int truecolor = has_truecolor();
+  int row;
+  Buf b;
+  free(etc);
+  free(file);
+  if (custom != NULL && len == 0) {	/* empty file: stay quiet */
+    free(custom);
+    return;
+  }
+  buf_init(&b);
+  buf_putc(&b, '\n');
+  if (custom != NULL) {	/* your own drawing */
+    buf_putn(&b, custom, len);
+    if (custom[len - 1] != '\n') buf_putc(&b, '\n');
+    buf_puts(&b, "\033[0m");
+    free(custom);
+  }
+  else {
+    for (row = 0; banner_art[row] != NULL; row++) {
+      char esc[40];
+      if (truecolor)
+        sprintf(esc, "\033[38;2;%d;%d;%dm", banner_rgb[row][0],
+                banner_rgb[row][1], banner_rgb[row][2]);
+      else strcpy(esc, row < 3 ? "\033[1;92m" : "\033[0;32m");
+      buf_puts(&b, "  ");
+      buf_puts(&b, esc);
+      buf_puts(&b, banner_art[row]);
+      buf_puts(&b, "\033[0m\n");
+    }
+  }
+  buf_putc(&b, '\n');
+  banner_lines(&b);
+  os_write(1, b.s, b.len);
+  buf_free(&b);
+}
+/* }================================================================== */
+
+
 static void repl (void) {
   if (sh_interactive) {
     char *hf = path_join(g_home, ".mmc_history");
     line_hist_load(hf);
     free(hf);
-    fd_printf(1, "%s %s - type 'help' for help, 'exit' to leave\n",
-              MMC_NAME, MMC_VERSION);
+    show_banner();
   }
   while (!sh_exit) {
     char *line;
@@ -265,7 +390,7 @@ static void repl (void) {
       os_tty_fix();
       show_prompt_header();
     }
-    line = line_read(sh_interactive ? "$ " : "");
+    line = line_read(sh_interactive ? prompt_last_line() : "");
     if (line == NULL) {
       if (sh_interactive) fd_puts(1, "exit\n");
       break;

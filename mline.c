@@ -452,6 +452,24 @@ static int read_escape (void) {
 }
 
 
+/* columns the prompt takes: color sequences (ESC [ ... m) take none */
+static size_t prompt_width (const char *p) {
+  size_t n = 0;
+  while (*p != '\0') {
+    if (p[0] == '\033' && p[1] == '[') {
+      for (p += 2; *p != '\0' && (*p < '@' || *p > '~'); p++)
+        ;
+      if (*p != '\0') p++;
+    }
+    else {
+      if (((unsigned char)*p & 0xC0) != 0x80) n++;
+      p++;
+    }
+  }
+  return n;
+}
+
+
 char *line_read (const char *prompt) {
   Edit e;
   size_t hpos = hist.n;	/* hist.n means "the line being typed" */
@@ -468,7 +486,7 @@ char *line_read (const char *prompt) {
   e.buf[0] = '\0';
   e.len = e.pos = 0;
   e.prompt = prompt;
-  e.pwidth = utf8_count(prompt, strlen(prompt));
+  e.pwidth = prompt_width(prompt);
   ed_refresh(&e);
   while (!done) {
     int c = os_tty_getbyte();
