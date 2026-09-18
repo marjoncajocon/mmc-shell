@@ -76,10 +76,72 @@ static void setup_root (const char *argv0, const char *forced) {
 }
 
 
+/*
+** The user of this mmc folder. mmc is carried from PC to PC, and the
+** login name is different on each of them; the home folder must not
+** be. So the name is kept in /etc/user: written on the first start
+** (from the home folder that is already there, or else from the login
+** name) and used everywhere after that. Edit the file to change it.
+*/
+static char *portable_user (void) {
+  char *etc = path_join(path_root(), "etc");
+  char *file = path_join(etc, "user");
+  char *home = path_join(path_root(), "home");
+  char *text = read_file(file, NULL);
+  char *name = NULL;
+  int fd;
+  if (text != NULL) {	/* first line that is not a comment */
+    char *line = text;
+    while (*line != '\0' && name == NULL) {
+      char *end = line + strcspn(line, "\r\n");
+      char *next = (*end == '\0') ? end : end + 1;
+      *end = '\0';
+      while (*line == ' ' || *line == '\t') line++;
+      while (end > line && (end[-1] == ' ' || end[-1] == '\t')) *--end = '\0';
+      if (line[0] != '\0' && line[0] != '#' && strpbrk(line, "/\\:*?\"<>|") == NULL)
+        name = xstrdup(line);
+      line = next;
+    }
+    free(text);
+  }
+  if (name == NULL) {
+    Vec dirs;
+    size_t i, homes = 0;
+    vec_init(&dirs);
+    os_listdir(home, &dirs);
+    for (i = 0; i < dirs.n; i++) {	/* exactly one home: that is the user */
+      char *full = path_join(home, dirs.v[i]);
+      OsStat st;
+      if (os_stat(full, &st) == 0 && st.is_dir) {
+        homes++;
+        free(name);
+        name = xstrdup(dirs.v[i]);
+      }
+      free(full);
+    }
+    if (homes != 1) {
+      free(name);
+      name = os_username();
+    }
+    vec_free(&dirs);
+    mkdir_p(etc);
+    if ((fd = os_open(file, OS_WRITE)) >= 0) {
+      fd_printf(fd, "# the user of this mmc folder: home is /home/<this name> on every PC\n"
+                    "%s\n", name);
+      os_close(fd);
+    }
+  }
+  free(etc);
+  free(file);
+  free(home);
+  return name;
+}
+
+
 static void setup_env (void) {
   Buf path;
   char level[16];
-  char *user = os_username();
+  char *user = portable_user();
   char *host = os_hostname();
   char *old = os_getenv("PATH");
   char *lvl = os_getenv("MMC_LEVEL");

@@ -27,6 +27,7 @@ The first run creates this next to the executable:
 <mmc folder>/            this is "/"
   mmc.exe  mmc-shell.exe
   etc/profile            settings for everyone (PATH to the tools)
+  etc/user               the user name: the same home on every PC
   home/<user>/.mmcrc     your own settings (aliases ...)
   home/<user>/.mmc_history
   usr/bin/               put your own programs and scripts here (in PATH)
@@ -192,6 +193,12 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 export PATH="$PATH:$MMC_DRIVE/PortableGit/cmd:$MMC_DRIVE/PortableGit/usr/bin"
 export EDITOR=nvim
 ```
+
+**One home on every PC.** mmc is carried around, and the login name is
+different on each PC — the home folder must not be. The name of the user is
+therefore kept in `/etc/user` (written on the first start) and `HOME` is
+`/home/<that name>` wherever the folder is plugged in; `.mmcrc`, the history
+and `.gitconfig` come along. Edit `/etc/user` to change the name.
 
 **Prompt.** The default is the two line Parrot OS style, with blue connector
 lines, and a red `[✗]` after a command that failed:
