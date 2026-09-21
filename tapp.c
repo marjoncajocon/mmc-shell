@@ -737,6 +737,7 @@ static int header_mouse (int type, int button, int x, int y) {
       else win_close();
     }
   }
+  else if (type == TMS_DOWN && button == 3) menu_open(x, y);
   return 1;
 }
 

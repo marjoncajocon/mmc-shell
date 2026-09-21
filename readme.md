@@ -141,7 +141,7 @@ mmc-term --render-test a.bmp draw a sample into an image, no window
 | Ctrl+Shift+wheel | see-through window: opacity 30 .. 100 % in steps of 5 (remembered; also in the menu) |
 | F11 or Alt+Enter | full screen |
 | Ctrl+Shift+N | new window |
-| right click | menu |
+| right click (anywhere, title bar too) | menu |
 
 **Tabs.** Every tab is its own shell, started in the folder of the tab you
 are in. The tab bar shows up with the second tab — the window grows by its

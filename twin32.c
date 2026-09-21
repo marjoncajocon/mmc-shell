@@ -344,6 +344,19 @@ static LRESULT CALLBACK wndproc (HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONUP: ReleaseCapture(); on_mouse(TMS_UP, 1, lp, wp, 0); return 0;
     case WM_MBUTTONDOWN: on_mouse(TMS_DOWN, 2, lp, wp, 0); return 0;
     case WM_RBUTTONDOWN: on_mouse(TMS_DOWN, 3, lp, wp, 0); return 0;
+    case WM_NCRBUTTONDOWN:	/* our title bar: our menu, not the system one */
+      if (custom_chrome && wp == HTCAPTION) {
+        POINT p;
+        p.x = GET_X_LPARAM(lp);
+        p.y = GET_Y_LPARAM(lp);
+        ScreenToClient(h, &p);
+        on_mouse(TMS_DOWN, 3, MAKELPARAM(p.x, p.y), 0, 0);
+        return 0;
+      }
+      break;
+    case WM_NCRBUTTONUP:
+      if (custom_chrome && wp == HTCAPTION) return 0;
+      break;
     case WM_MOUSEMOVE:
       if (!tracking_mouse) {
         TRACKMOUSEEVENT t;
