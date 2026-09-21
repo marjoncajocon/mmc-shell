@@ -5,6 +5,7 @@ rem   build                 mmc.exe, mmc-shell.exe and mmc-term.exe for this PC
 rem   build cross           every platform, into dist\
 rem   build test            run the tests of the terminal core
 rem   build install DIR     copy the programs into DIR (add DIR to your PATH)
+rem   build release         the downloads of a release, into release\
 rem   build clean
 rem
 rem mmc.exe and mmc-shell.exe are the same program: the shell. Windows already
@@ -33,8 +34,9 @@ if "%1"=="" goto native
 if "%1"=="cross" goto cross
 if "%1"=="test" goto test
 if "%1"=="install" goto install
+if "%1"=="release" goto release
 if "%1"=="clean" goto clean
-echo usage: build [cross ^| test ^| install DIR ^| clean]
+echo usage: build [cross ^| test ^| install DIR ^| release ^| clean]
 exit /b 2
 
 :native
@@ -87,6 +89,65 @@ if not exist "%~2\usr\share\fonts" mkdir "%~2\usr\share\fonts"
 for %%F in (%FONTS%) do copy /y %%F "%~2\usr\share\fonts\%%F" >nul
 echo installed mmc.exe, mmc-shell.exe and mmc-term.exe in "%~2"
 echo add "%~2" to your PATH, then type: mmc-term  (the window)  or  mmc-shell
+exit /b 0
+
+rem One archive per system, named mmc-shell-VERSION-SYSTEM, each with a folder
+rem of that name inside: only the programs, LICENSE and the font (no source).
+rem Windows gets .zip, Linux and macOS .tar.gz (the mtree lists give the
+rem programs their x bit, which a file on a Windows disk does not have).
+rem SHA256SUMS.txt lets people check a download: sha256sum -c SHA256SUMS.txt
+:release
+set VER=
+for /f "tokens=3" %%V in ('findstr /b /c:"#define MMC_VERSION" mmc.h') do set VER=%%~V
+if "%VER%"=="" (
+  echo cannot read MMC_VERSION from mmc.h
+  exit /b 1
+)
+rem the tar of Windows 10 and newer (bsdtar): it also writes zip files
+set TAR=%SystemRoot%\System32\tar.exe
+call "%~f0" test || exit /b 1
+call "%~f0" cross || exit /b 1
+if exist release rmdir /s /q release
+mkdir release
+call :winpkg x86_64 x64 || exit /b 1
+call :winpkg aarch64 arm64 || exit /b 1
+call :unixpkg x86_64 linux linux-x64 || exit /b 1
+call :unixpkg aarch64 linux linux-arm64 || exit /b 1
+call :unixpkg x86_64 macos macos-x64 || exit /b 1
+call :unixpkg aarch64 macos macos-arm64 || exit /b 1
+call :unixpkg arm linux linux-arm shell || exit /b 1
+rem written with \n line ends, or sha256sum -c on Linux fails
+powershell -NoProfile -Command "$l = Get-ChildItem release -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() + '  ' + $_.Name }; [IO.File]::WriteAllText((Join-Path (Resolve-Path release) 'SHA256SUMS.txt'), ($l -join [char]10) + [char]10)" || exit /b 1
+echo mmc %VER% is ready in release\
+dir /b release
+exit /b 0
+
+rem %1 = zig's name of the CPU, %2 = the name in the archive
+:winpkg
+set PKG=mmc-shell-%VER%-windows-%2
+set D=release\%PKG%
+mkdir "%D%\usr\share\fonts"
+copy /y dist\mmc-shell-%1-windows.exe "%D%\mmc.exe" >nul || exit /b 1
+copy /y dist\mmc-shell-%1-windows.exe "%D%\mmc-shell.exe" >nul || exit /b 1
+copy /y dist\mmc-term-%1-windows.exe "%D%\mmc-term.exe" >nul || exit /b 1
+copy /y LICENSE "%D%\LICENSE" >nul
+for %%F in (%FONTS%) do copy /y %%F "%D%\usr\share\fonts\%%F" >nul
+"%TAR%" -a -cf "release\%PKG%.zip" -C release %PKG% || exit /b 1
+rmdir /s /q "%D%"
+exit /b 0
+
+rem %1 = CPU, %2 = linux or macos, %3 = the name in the archive,
+rem %4 = "shell" for the shell alone (32 bit ARM has no mmc-term)
+:unixpkg
+set PKG=mmc-shell-%VER%-%3
+set M=release\%PKG%.mtree
+> "%M%" echo #mtree
+>>"%M%" echo %PKG%/mmc type=file mode=0755 contents=dist/mmc-%1-%2
+if not "%4"=="shell" >>"%M%" echo %PKG%/mmc-term type=file mode=0755 contents=dist/mmc-term-%1-%2
+>>"%M%" echo %PKG%/LICENSE type=file mode=0644 contents=LICENSE
+if not "%4"=="shell" for %%F in (%FONTS%) do >>"%M%" echo %PKG%/usr/share/fonts/%%F type=file mode=0644 contents=%%F
+"%TAR%" -czf "release\%PKG%.tar.gz" "@%M%" || exit /b 1
+del "%M%"
 exit /b 0
 
 :clean

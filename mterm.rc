@@ -1,13 +1,13 @@
 /*
 ** mterm.rc - Windows resources of mmc-term: the icon and version details.
-** Icon source: logo/10-diamond-m-monogram.svg
+** The icon is mmc.ico. Keep the version the same as MMC_VERSION in mmc.h.
 */
 
 1 ICON "mmc.ico"
 
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION 0,2,0,0
+PRODUCTVERSION 0,2,0,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -15,11 +15,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Marjon Mangindo Cajocon"
       VALUE "FileDescription", "MMC terminal"
-      VALUE "FileVersion", "0.1.0"
+      VALUE "FileVersion", "0.2.0"
       VALUE "InternalName", "mmc-term"
       VALUE "OriginalFilename", "mmc-term.exe"
       VALUE "ProductName", "MMC shell"
-      VALUE "ProductVersion", "0.1.0"
+      VALUE "ProductVersion", "0.2.0"
     END
   END
   BLOCK "VarFileInfo"

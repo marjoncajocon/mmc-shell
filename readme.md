@@ -44,6 +44,7 @@ build                 Windows: mmc.exe, mmc-shell.exe and mmc-term.exe
 build cross           every platform, into dist\
 build test            run the tests of the terminal core
 build install D:\mmc  copy the programs into a folder
+build release         tests, then the download archives + SHA256SUMS.txt in release\
 bash tests/run.sh     the bash compatibility tests (mmc tests/run.sh works too)
 build clean
 ```
@@ -98,11 +99,29 @@ Android has no `/tmp`). mmc-term needs X11 or Cocoa, so Android gets the shell.
 | `ttest.c` | tests of the terminal core, without a window |
 | `stb_truetype.h` | font rasterizer by Sean Barrett, public domain, the only code not written here |
 | `JetBrainsMonoNerdFontMono-*.ttf`, `JetBrainsMonoNerdFont-OFL.txt`, `JetBrainsMonoNerdFont-README.md` | the default font: [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) v2.304 with its ligatures and the [Nerd Fonts](https://www.nerdfonts.com) v3.5.1 Powerline and icon glyphs (SIL Open Font License 1.1; the icon sets' licenses are in the README); `install` copies it to `usr/share/fonts` |
-| `tests/compat/` | 420 small bash scripts with what real bash printed for them; `tests/run.sh` compares mmc |
+| `tests/compat/` | 440 small bash scripts with what real bash printed for them; `tests/run.sh` compares mmc |
+
+## Download
+
+Ready programs are on the
+[Releases page](https://github.com/marjoncajocon/mmc-shell/releases): one
+archive per system, with only the programs, the license and the font.
+
+| Archive | For |
+|---|---|
+| `mmc-shell-VERSION-windows-x64.zip` | Windows 10/11, most PCs |
+| `mmc-shell-VERSION-windows-arm64.zip` | Windows on ARM (Snapdragon laptops) |
+| `mmc-shell-VERSION-linux-x64.tar.gz`, `-linux-arm64.tar.gz` | Linux (not yet tested on a real machine) |
+| `mmc-shell-VERSION-macos-x64.tar.gz`, `-macos-arm64.tar.gz` | macOS Intel / Apple Silicon (not yet tested) |
+| `mmc-shell-VERSION-linux-arm.tar.gz` | the shell alone, for older 32 bit Android phones |
+
+Unzip it anywhere (a USB drive works too); that folder becomes `/`.
+`SHA256SUMS.txt` checks a download: `sha256sum -c SHA256SUMS.txt`.
 
 ## Install on Windows
 
-1. `build install D:\mmc` (any folder on any drive works).
+1. Unzip the release archive into a folder, or build it yourself with
+   `build install D:\mmc` (any folder on any drive works).
 2. Add that folder to the Windows `PATH`
    (Settings → "Edit environment variables for your account" → Path → New).
 3. Type `mmc-term` in Win+R or in the address bar of an Explorer window — the
@@ -392,7 +411,7 @@ settings are `$MMC_ROOT/etc/profile` and `$MMC_ROOT/home/<user>/.mmcrc`.
 
 ## What the shell can do
 
-mmc runs bash scripts. `tests/compat` has 420 cases taken from how the scripts
+mmc runs bash scripts. `tests/compat` has 440 cases taken from how the scripts
 on a developer PC really use bash (git, gradle, flutter, npm, emsdk, the
 Android SDK: see `tests/compat/RESEARCH.md`); mmc gives the same output and
 exit status as bash 5.3 for all of them.
@@ -548,10 +567,10 @@ calls the Win32 API on Windows and the POSIX API on Linux/macOS (see `mos.c`).
 ## Tested
 
 Windows 11: builds with zero warnings (`-std=c11 -Wall -Wextra -pedantic`);
-`tests/run.sh` passes all 420 bash compatibility cases, also when mmc runs
+`tests/run.sh` passes all 440 bash compatibility cases, also when mmc runs
 the test script itself; `mmc --check` reads the 70 shell scripts of
 PortableGit, Flutter, emsdk and the Android SDK without a syntax error;
-`build test` passes the 124 checks of the terminal core.
+`build test` passes the 290 checks of the terminal core.
 Linux, macOS and Android: compile cleanly (x86_64, aarch64, and arm for
 Android), not yet run.
 Windows 10 or newer is needed (the console must understand VT sequences).

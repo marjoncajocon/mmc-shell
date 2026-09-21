@@ -24,7 +24,7 @@
 #include <time.h>
 
 #define MMC_NAME	"mmc"
-#define MMC_VERSION	"0.2.0"
+#define MMC_VERSION	"0.2.0"	/* also in mmc.rc and mterm.rc */
 #define MMC_AUTHOR	"Marjon Mangindo Cajocon"
 /* what $BASH_VERSION says: scripts check it before using bash features */
 #define MMC_BASH_COMPAT	"5.2.0(1)-release"
