@@ -18,6 +18,8 @@ static Cell blank_cell (const Grid *g) {
   c.fg = COL_DEFAULT;
   c.bg = g ? g->pen.bg : COL_DEFAULT;	/* erased cells keep the background */
   c.attr = 0;
+  c.link = 0;
+  c.ul = COL_DEFAULT;
   return c;
 }
 
@@ -79,6 +81,8 @@ Grid *grid_new (int cols, int rows, int scrollback) {
   memset(g, 0, sizeof(*g));
   g->cols = cols < 2 ? 2 : cols;
   g->rows = rows < 1 ? 1 : rows;
+  g->cell_w = 10;
+  g->cell_h = 20;
   g->sb_cap = scrollback < 0 ? 0 : scrollback;
   if (g->sb_cap > 0) {
     g->sb = (Line *)xmalloc((size_t)g->sb_cap * sizeof(Line));
@@ -103,6 +107,12 @@ void grid_free (Grid *g) {
   free(g->other);
   free(g->sb);
   free(g->tabs);
+  free(g->clu);
+  free(g->clu_hash);
+  for (i = 0; i < g->nimages; i++) free(g->images[i].px);
+  free(g->images);
+  for (i = 0; i < g->nlinks; i++) free(g->links[i]);
+  free(g->links);
   free(g);
 }
 
@@ -124,6 +134,8 @@ void grid_reset (Grid *g) {
   g->app_cursor = g->bracketed = g->focus_events = g->insert = 0;
   g->mouse = g->mouse_sgr = 0;
   g->cursor_shape = 0;
+  g->sync = g->join_next = g->origin = 0;
+  g->kitty_n[0] = g->kitty_n[1] = 0;
   g->view = 0;
   memset(g->saved_cx, 0, sizeof(g->saved_cx));
   memset(g->saved_cy, 0, sizeof(g->saved_cy));
@@ -233,7 +245,7 @@ void grid_set_region (Grid *g, int top, int bot) {
   }
   g->top = top;
   g->bot = bot;
-  grid_move(g, 0, 0);
+  grid_move(g, 0, g->origin ? top : 0);	/* home, which is the region's top in origin mode */
 }
 
 
@@ -278,7 +290,7 @@ void grid_move (Grid *g, int x, int y) {
   if (y != g->cy) g->screen[g->cy].dirty = 1;
   g->cx = x;
   g->cy = y;
-  g->wrap_next = 0;
+  g->wrap_next = g->join_next = 0;
   g->screen[g->cy].dirty = 1;
 }
 
@@ -350,28 +362,152 @@ void grid_restore_cursor (Grid *g) {
 ** ===================================================================
 */
 
-/* double width and zero width characters (a compact wcwidth) */
+int grid_kitty (const Grid *g) {
+  int n = g->kitty_n[g->alt];
+  return n > 0 ? g->kitty[g->alt][n - 1] : 0;
+}
+
+
 int grid_wcwidth (uint32_t ch) {
-  static const uint32_t wide[][2] = {
-    {0x1100, 0x115F}, {0x2E80, 0x303E}, {0x3041, 0x33FF}, {0x3400, 0x4DBF},
-    {0x4E00, 0x9FFF}, {0xA000, 0xA4CF}, {0xAC00, 0xD7A3}, {0xF900, 0xFAFF},
-    {0xFE30, 0xFE4F}, {0xFF00, 0xFF60}, {0xFFE0, 0xFFE6}, {0x1F300, 0x1F64F},
-    {0x1F680, 0x1F6FF}, {0x1F900, 0x1F9FF}, {0x20000, 0x3FFFD}
-  };
-  static const uint32_t zero[][2] = {
-    {0x0300, 0x036F}, {0x0483, 0x0489}, {0x0591, 0x05BD}, {0x0610, 0x061A},
-    {0x064B, 0x065F}, {0x1AB0, 0x1AFF}, {0x1DC0, 0x1DFF}, {0x200B, 0x200F},
-    {0x2028, 0x202E}, {0x2060, 0x2064}, {0x20D0, 0x20FF}, {0xFE00, 0xFE0F},
-    {0xFE20, 0xFE2F}, {0xFEFF, 0xFEFF}, {0xE0100, 0xE01EF}
-  };
-  size_t i;
-  if (ch < 0x300) return 1;
-  for (i = 0; i < sizeof(zero) / sizeof(zero[0]); i++)
-    if (ch >= zero[i][0] && ch <= zero[i][1]) return 0;
-  for (i = 0; i < sizeof(wide) / sizeof(wide[0]); i++)
-    if (ch >= wide[i][0] && ch <= wide[i][1]) return 2;
+  return uc_width(ch);
+}
+
+
+/*
+** {==================================================================
+** Clusters: a character and the marks joined to it (e + U+0301 is é,
+** an emoji and a skin tone, emoji joined with U+200D) share one cell.
+** Every different cluster is kept once, for as long as the grid lives.
+** ===================================================================
+*/
+
+#define CLU_MAX_CPS	16
+#define CLU_MAX_SIZE	(1 << 22)
+
+
+static uint32_t clu_hash_of (const uint32_t *cp, int n) {
+  uint32_t h = 2166136261u;
+  int i;
+  for (i = 0; i < n; i++) {
+    h ^= cp[i];
+    h *= 16777619u;
+  }
+  return h;
+}
+
+
+static void clu_rehash (Grid *g, int cap) {
+  int off, *old = g->clu_hash, oldcap = g->clu_hcap, i;
+  g->clu_hash = (int *)xmalloc((size_t)cap * sizeof(int));
+  memset(g->clu_hash, 0, (size_t)cap * sizeof(int));
+  g->clu_hcap = cap;
+  for (i = 0; i < oldcap; i++) {
+    uint32_t h;
+    if (old[i] == 0) continue;
+    off = old[i] - 1;
+    h = clu_hash_of(g->clu + off + 1, (int)g->clu[off]) & (uint32_t)(cap - 1);
+    while (g->clu_hash[h] != 0) h = (h + 1) & (uint32_t)(cap - 1);
+    g->clu_hash[h] = old[i];
+  }
+  free(old);
+}
+
+
+/* the place of this cluster in g->clu, added if new; -1 when all is full */
+static int clu_intern (Grid *g, const uint32_t *cp, int n) {
+  uint32_t h;
+  if (g->clu_hcap < 2 * (g->nclu + n + 1)) {	/* entries are 3 or more long */
+    int cap = g->clu_hcap ? g->clu_hcap : 256;
+    while (cap < 2 * (g->nclu + n + 1)) cap *= 2;
+    clu_rehash(g, cap);
+  }
+  h = clu_hash_of(cp, n) & (uint32_t)(g->clu_hcap - 1);
+  while (g->clu_hash[h] != 0) {
+    int off = g->clu_hash[h] - 1;
+    if ((int)g->clu[off] == n && memcmp(g->clu + off + 1, cp, (size_t)n * sizeof(uint32_t)) == 0)
+      return off;
+    h = (h + 1) & (uint32_t)(g->clu_hcap - 1);
+  }
+  if (g->nclu + n + 1 > CLU_MAX_SIZE) return -1;
+  if (g->nclu + n + 1 > g->capclu) {
+    while (g->nclu + n + 1 > g->capclu) g->capclu = g->capclu ? g->capclu * 2 : 256;
+    g->clu = (uint32_t *)xrealloc(g->clu, (size_t)g->capclu * sizeof(uint32_t));
+  }
+  g->clu[g->nclu] = (uint32_t)n;
+  memcpy(g->clu + g->nclu + 1, cp, (size_t)n * sizeof(uint32_t));
+  g->clu_hash[h] = g->nclu + 1;
+  g->nclu += n + 1;
+  return g->nclu - n - 1;
+}
+
+
+int grid_cps (const Grid *g, const Cell *c, const uint32_t **cps) {
+  static const uint32_t space = ' ';
+  if ((c->ch & CH_IMAGE) && !(c->ch & CH_CLUSTER)) {	/* copied as a blank */
+    *cps = &space;
+    return 1;
+  }
+  if (c->ch & CH_CLUSTER) {
+    uint32_t off = c->ch & ~CH_CLUSTER;
+    *cps = g->clu + off + 1;
+    return (int)g->clu[off];
+  }
+  *cps = &c->ch;
   return 1;
 }
+
+
+uint32_t grid_base (const Grid *g, const Cell *c) {
+  if (c->ch & CH_CLUSTER) return g->clu[(c->ch & ~CH_CLUSTER) + 1];
+  return (c->ch & CH_IMAGE) ? ' ' : c->ch;
+}
+
+
+/* a mark joins the character the cursor just wrote */
+static void join_prev (Grid *g, uint32_t ch) {
+  Line *l = &g->screen[g->cy];
+  uint32_t buf[CLU_MAX_CPS];
+  const uint32_t *cps;
+  int x = g->wrap_next ? g->cx : g->cx - 1, n, off;
+  if (x < 0 || x >= l->n) return;
+  if ((l->c[x].attr & A_WCONT) && x > 0) x--;
+  if (l->c[x].ch == 0) return;	/* nothing to join: the mark goes */
+  n = grid_cps(g, &l->c[x], &cps);
+  if (n >= CLU_MAX_CPS) return;
+  memcpy(buf, cps, (size_t)n * sizeof(uint32_t));
+  buf[n++] = ch;
+  off = clu_intern(g, buf, n);
+  if (off < 0) return;
+  l->c[x].ch = CH_CLUSTER | (uint32_t)off;
+  l->dirty = 1;
+}
+
+/* }================================================================== */
+
+
+/*
+** {==================================================================
+** Hyperlinks (OSC 8)
+** ===================================================================
+*/
+
+int grid_link_add (Grid *g, const char *uri) {
+  int i;
+  for (i = g->nlinks - 1; i >= 0 && i >= g->nlinks - 64; i--)	/* the same one again */
+    if (strcmp(g->links[i], uri) == 0) return i + 1;
+  if (g->nlinks >= 65535) return 0;
+  if (g->nlinks == 0 || (g->nlinks >= 8 && (g->nlinks & (g->nlinks - 1)) == 0))
+    g->links = (char **)xrealloc(g->links, (size_t)(g->nlinks ? g->nlinks * 2 : 8) * sizeof(char *));
+  g->links[g->nlinks++] = xstrdup(uri);
+  return g->nlinks;
+}
+
+
+const char *grid_link (const Grid *g, int link) {
+  return (link >= 1 && link <= g->nlinks) ? g->links[link - 1] : NULL;
+}
+
+/* }================================================================== */
 
 
 /* a cell is about to change: do not leave half a wide character behind */
@@ -392,7 +528,16 @@ static void unlink_wide (Grid *g, Line *l, int x) {
 void grid_putc (Grid *g, uint32_t ch) {
   Line *l;
   int w = grid_wcwidth(ch);
-  if (w == 0) return;	/* combining marks are not composed (yet) */
+  if (g->join_next) {	/* after a joiner: one emoji made of several */
+    g->join_next = 0;
+    join_prev(g, ch);
+    return;
+  }
+  if (w == 0) {	/* an accent, a skin tone, a joiner: onto the one before */
+    join_prev(g, ch);
+    if (ch == 0x200D) g->join_next = 1;
+    return;
+  }
   if (g->wrap_next && g->autowrap) {
     g->screen[g->cy].wrapped = 1;
     grid_cr(g);
@@ -425,6 +570,83 @@ void grid_putc (Grid *g, uint32_t ch) {
     g->wrap_next = g->autowrap;
   }
 }
+
+
+/*
+** {==================================================================
+** Images (sixel): a picture sits on the cells it covers; each of them
+** holds CH_IMAGE, the image's id and which piece of it is there. So it
+** scrolls, reflows and is written over like text. Images are kept up to
+** a total size; after that the oldest go and their cells show nothing.
+** ===================================================================
+*/
+
+#define IMG_BYTES_MAX	((size_t)64 << 20)
+
+
+static void image_drop_oldest (Grid *g) {
+  free(g->images[0].px);
+  g->img_bytes -= (size_t)g->images[0].w * (size_t)g->images[0].h * 4;
+  memmove(g->images, g->images + 1, (size_t)(g->nimages - 1) * sizeof(GridImage));
+  g->nimages--;
+}
+
+
+const GridImage *grid_image (const Grid *g, uint32_t ch, int *tile) {
+  int id = (int)((ch >> 16) & 0x3FFF), i;
+  *tile = (int)(ch & 0xFFFF);
+  for (i = g->nimages - 1; i >= 0; i--)
+    if (g->images[i].id == id) return &g->images[i];
+  return NULL;
+}
+
+
+/* puts an image (0xAARRGGBB, takes px) at the cursor; the cursor goes below it */
+void grid_put_image (Grid *g, uint32_t *px, int w, int h) {
+  int cw = g->cell_w > 0 ? g->cell_w : 10, ch = g->cell_h > 0 ? g->cell_h : 20;
+  int cols = (w + cw - 1) / cw, rows = (h + ch - 1) / ch, x0 = g->cx, r, c, id;
+  GridImage *im;
+  if (w <= 0 || h <= 0) {
+    free(px);
+    return;
+  }
+  if (cols > g->cols - x0) cols = g->cols - x0;
+  if (cols < 1) cols = 1;
+  if (rows * cols > 0xFFFF) rows = 0xFFFF / cols;	/* the piece number has 16 bits */
+  id = g->img_next = (g->img_next % 0x3FFF) + 1;
+  while (g->nimages > 0 && (g->img_bytes + (size_t)w * (size_t)h * 4 > IMG_BYTES_MAX ||
+                            g->nimages >= 1024))
+    image_drop_oldest(g);
+  if (g->nimages == g->capimages) {
+    g->capimages = g->capimages ? g->capimages * 2 : 16;
+    g->images = (GridImage *)xrealloc(g->images, (size_t)g->capimages * sizeof(GridImage));
+  }
+  im = &g->images[g->nimages++];
+  im->id = id;
+  im->px = px;
+  im->w = w;
+  im->h = h;
+  im->cw = cw;
+  im->ch = ch;
+  im->tw = cols;
+  g->img_bytes += (size_t)w * (size_t)h * 4;
+  g->wrap_next = 0;
+  for (r = 0; r < rows; r++) {
+    Line *l = &g->screen[g->cy];
+    for (c = 0; c < cols && x0 + c < g->cols; c++) {
+      Cell *cell = &l->c[x0 + c];
+      unlink_wide(g, l, x0 + c);
+      *cell = blank_cell(NULL);
+      cell->ch = CH_IMAGE | ((uint32_t)id << 16) | (uint32_t)(r * cols + c);
+    }
+    l->dirty = 1;
+    g->cx = x0;
+    grid_lf(g);	/* scrolls at the bottom, like text does */
+  }
+  g->cx = x0;
+}
+
+/* }================================================================== */
 
 
 void grid_erase_line (Grid *g, int mode) {
@@ -525,36 +747,230 @@ void grid_set_alt (Grid *g, int on, int clear) {
 }
 
 
-/* new size; text is not re-wrapped (the program repaints its screen) */
+/*
+** A new size for one screen, cut or padded as it is (the alternate
+** screen: the program there repaints it). k = 0: the active screen.
+*/
+static void resize_plain (Grid *g, int k, int cols, int rows) {
+  Line **scr = (k == 0) ? &g->screen : &g->other;
+  int primary = (k == 0) ? !g->alt : g->alt;
+  int n = g->rows, y;
+  while (n > rows) {	/* too many lines */
+    int has_cursor_room = (k != 0) || g->cy < n - 1;
+    if (has_cursor_room && line_is_blank(&(*scr)[n - 1])) free((*scr)[n - 1].c);
+    else {	/* drop from the top instead */
+      Line first = (*scr)[0];
+      int alt = g->alt;
+      if (primary) {
+        g->alt = 0;
+        sb_push(g, &first);
+        g->alt = alt;
+      }
+      else free(first.c);
+      memmove(&(*scr)[0], &(*scr)[1], (size_t)(n - 1) * sizeof(Line));
+      if (k == 0 && g->cy > 0) g->cy--;
+    }
+    n--;
+  }
+  *scr = (Line *)xrealloc(*scr, (size_t)rows * sizeof(Line));
+  for (y = n; y < rows; y++) line_init(g, &(*scr)[y], cols);
+  for (y = 0; y < n; y++) line_set_cols(g, &(*scr)[y], cols);
+}
+
+
+/*
+** {==================================================================
+** Reflow: when the width changes, the text of the primary screen and
+** of the scrollback is wrapped again, like a paragraph in an editor
+** ===================================================================
+*/
+
+typedef struct LLine {	/* a logical line: the rows the terminal wrapped, joined */
+  Cell *c;
+  int n, cap;
+} LLine;
+
+
+static void ll_add (LLine *ll, const Cell *c, int n) {
+  if (ll->n + n > ll->cap) {
+    while (ll->n + n > ll->cap) ll->cap = ll->cap ? ll->cap * 2 : 64;
+    ll->c = (Cell *)xrealloc(ll->c, (size_t)ll->cap * sizeof(Cell));
+  }
+  memcpy(ll->c + ll->n, c, (size_t)n * sizeof(Cell));
+  ll->n += n;
+}
+
+
+/* a place in a logical line, and where it lands after the new wrapping */
+typedef struct Spot {
+  int ll, off;
+  int row, col, wrap;	/* wrap: the row is full, the next character goes on */
+} Spot;
+
+
+static void spot_at (Spot *sp, int i, int j, int x, int nout, int cols, int end) {
+  if (sp->ll != i || sp->off != j) return;
+  if (end && x >= cols) {	/* right after a full row */
+    sp->row = nout - 1;
+    sp->col = cols - 1;
+    sp->wrap = 1;
+  }
+  else if (x >= cols) {	/* the character there starts the next row */
+    sp->row = nout;
+    sp->col = 0;
+  }
+  else {
+    sp->row = nout - 1;
+    sp->col = x;
+  }
+}
+
+
+static void spot_past (Spot *sp, int i, int n, int x, int nout, int cols) {
+  int col;
+  if (sp->ll != i || sp->off <= n) return;	/* past the text: after blanks */
+  col = (x >= cols ? 0 : x) + (sp->off - n);
+  sp->row = nout - 1 + (x >= cols ? 1 : 0);
+  sp->col = col >= cols ? cols - 1 : col;
+}
+
+
+static Line *out_room (Line *out, int *cap, int need) {
+  if (need <= *cap) return out;
+  *cap = need * 2;
+  return (Line *)xrealloc(out, (size_t)*cap * sizeof(Line));
+}
+
+
+static void reflow (Grid *g, Line **scrp, int *cx, int *cy, int *wrap_next,
+                    int cols, int rows) {
+  Line *scr = *scrp, *out = NULL;
+  LLine *lls = NULL;
+  int nll = 0, capll = 0, nout = 0, capout = 0;
+  int last, i, y, nphys, prev_wrapped = 0, top;
+  Spot cur, first;
+  memset(&cur, 0, sizeof(cur));
+  memset(&first, 0, sizeof(first));
+  cur.ll = first.ll = -1;
+  /* the rows of the screen that count: down to the cursor, or text below it */
+  for (last = g->rows - 1; last > *cy && line_is_blank(&scr[last]); last--)
+    ;
+  nphys = g->sb_len + last + 1;
+  for (i = 0; i < nphys; i++) {
+    int sb = (i < g->sb_len), sy = i - g->sb_len, n;
+    Line *l = sb ? &g->sb[(g->sb_head + i) % g->sb_cap] : &scr[sy];
+    LLine *ll;
+    if (i == 0 || !prev_wrapped) {
+      if (nll == capll) {
+        capll = capll ? capll * 2 : 256;
+        lls = (LLine *)xrealloc(lls, (size_t)capll * sizeof(LLine));
+      }
+      memset(&lls[nll++], 0, sizeof(LLine));
+    }
+    ll = &lls[nll - 1];
+    n = l->n;
+    if (l->wrapped) {	/* a wide character that did not fit left a hole */
+      if (n > 0 && l->c[n - 1].ch == 0 && !(l->c[n - 1].attr & A_WCONT)) n--;
+    }
+    else while (n > 0 && l->c[n - 1].ch == 0 && !(l->c[n - 1].attr & A_WCONT)) n--;
+    if (!sb && sy == 0) {
+      first.ll = nll - 1;
+      first.off = ll->n;
+    }
+    if (!sb && sy == *cy) {
+      cur.ll = nll - 1;
+      cur.off = ll->n + *cx + (*wrap_next ? 1 : 0);
+    }
+    if (n > 0) ll_add(ll, l->c, n);
+    prev_wrapped = l->wrapped;
+    free(l->c);
+    l->c = NULL;
+  }
+  for (y = last + 1; y < g->rows; y++) free(scr[y].c);
+  free(scr);
+  g->sb_len = g->sb_head = 0;	/* every line of it was taken above */
+  for (i = 0; i < nll; i++) {	/* now wrap them again */
+    LLine *ll = &lls[i];
+    int x = 0, j;
+    Line *l;
+    out = out_room(out, &capout, nout + ll->n / (cols - 1) + 2);
+    line_init(NULL, &out[nout], cols);
+    l = &out[nout++];
+    for (j = 0; j <= ll->n; j++) {
+      int w;
+      spot_at(&cur, i, j, x, nout, cols, j == ll->n);
+      spot_at(&first, i, j, x, nout, cols, j == ll->n);
+      if (j == ll->n) break;
+      if (ll->c[j].attr & A_WCONT) continue;	/* it comes with its first half */
+      w = (ll->c[j].attr & A_WIDE) ? 2 : 1;
+      if (x + w > cols) {	/* the row is full: on to the next */
+        l->wrapped = 1;
+        line_init(NULL, &out[nout], cols);
+        l = &out[nout++];
+        x = 0;
+      }
+      l->c[x] = ll->c[j];
+      if (w == 2) {
+        l->c[x + 1] = ll->c[j];
+        l->c[x + 1].ch = 0;
+        l->c[x + 1].attr = (uint16_t)((ll->c[j].attr & ~A_WIDE) | A_WCONT);
+      }
+      x += w;
+    }
+    spot_past(&cur, i, ll->n, x, nout, cols);
+    spot_past(&first, i, ll->n, x, nout, cols);
+    free(ll->c);
+  }
+  free(lls);
+  while (cur.row >= nout) {	/* the cursor sits on a row of its own */
+    out = out_room(out, &capout, nout + 1);
+    line_init(NULL, &out[nout++], cols);
+  }
+  /* the screen starts where it did, as far as the cursor lets it */
+  top = (first.ll >= 0) ? first.row : 0;
+  if (nout - top > rows) top = nout - rows;
+  if (top > cur.row) top = cur.row;
+  if (cur.row - top >= rows) top = cur.row - rows + 1;
+  if (top < 0) top = 0;
+  for (i = 0; i < top; i++) sb_push(g, &out[i]);
+  *scrp = (Line *)xmalloc((size_t)rows * sizeof(Line));
+  for (y = 0; y < rows; y++) {
+    if (top + y < nout) (*scrp)[y] = out[top + y];
+    else line_init(NULL, &(*scrp)[y], cols);
+  }
+  for (i = top + rows; i < nout; i++) free(out[i].c);
+  free(out);
+  *cx = cur.col;
+  *cy = cur.row - top;
+  *wrap_next = cur.wrap;
+}
+
+/* }================================================================== */
+
+
+/*
+** A new size. When the width changes, the primary screen and the
+** scrollback are wrapped again; the alternate screen is cut or padded.
+*/
 void grid_resize (Grid *g, int cols, int rows) {
-  int y, k;
+  int k, wrap = 0;
   if (cols < 2) cols = 2;
   if (rows < 1) rows = 1;
   if (cols == g->cols && rows == g->rows) return;
-  for (k = 0; k < 2; k++) {	/* k = 0: active screen, 1: the other one */
-    Line **scr = (k == 0) ? &g->screen : &g->other;
-    int primary = (k == 0) ? !g->alt : g->alt;
-    int n = g->rows;
-    while (n > rows) {	/* too many lines */
-      int has_cursor_room = (k != 0) || g->cy < n - 1;
-      if (has_cursor_room && line_is_blank(&(*scr)[n - 1])) free((*scr)[n - 1].c);
-      else {	/* drop from the top instead */
-        Line first = (*scr)[0];
-        int alt = g->alt;
-        if (primary) {
-          g->alt = 0;
-          sb_push(g, &first);
-          g->alt = alt;
-        }
-        else free(first.c);
-        memmove(&(*scr)[0], &(*scr)[1], (size_t)(n - 1) * sizeof(Line));
-        if (k == 0 && g->cy > 0) g->cy--;
-      }
-      n--;
-    }
-    *scr = (Line *)xrealloc(*scr, (size_t)rows * sizeof(Line));
-    for (y = n; y < rows; y++) line_init(g, &(*scr)[y], cols);
-    for (y = 0; y < n; y++) line_set_cols(g, &(*scr)[y], cols);
+  g->view = 0;
+  if (cols != g->cols && g->alt) {
+    resize_plain(g, 0, cols, rows);
+    reflow(g, &g->other, &g->saved_cx[0], &g->saved_cy[0], &wrap, cols, rows);
+    g->wrap_next = 0;
+  }
+  else if (cols != g->cols) {
+    resize_plain(g, 1, cols, rows);
+    reflow(g, &g->screen, &g->cx, &g->cy, &g->wrap_next, cols, rows);
+  }
+  else {
+    resize_plain(g, 0, cols, rows);
+    resize_plain(g, 1, cols, rows);
+    g->wrap_next = 0;
   }
   g->cols = cols;
   g->rows = rows;
@@ -566,8 +982,6 @@ void grid_resize (Grid *g, int cols, int rows) {
     if (g->saved_cx[k] >= cols) g->saved_cx[k] = cols - 1;
     if (g->saved_cy[k] >= rows) g->saved_cy[k] = rows - 1;
   }
-  g->wrap_next = 0;
-  if (g->view > g->sb_len) g->view = g->sb_len;
   set_tabs(g);
   g->all_dirty = 1;
 }
@@ -611,8 +1025,11 @@ char *grid_text (const Grid *g, int x0, int y0, int x1, int y1) {
     for (last = to; last >= from && l->c[last].ch == 0; last--)
       ;	/* trailing blanks are not text */
     for (x = from; x <= last; x++) {
+      const uint32_t *cps;
+      int n, k;
       if (l->c[x].attr & A_WCONT) continue;
-      put_utf8(&b, l->c[x].ch ? l->c[x].ch : ' ');
+      n = grid_cps(g, &l->c[x], &cps);
+      for (k = 0; k < n; k++) put_utf8(&b, cps[k] ? cps[k] : ' ');
     }
     if (y < y1 && !(l->wrapped && last == l->n - 1)) buf_putc(&b, '\n');
   }

@@ -40,11 +40,24 @@
 #define A_HIDDEN	0x0040
 #define A_WIDE		0x0080	/* first half of a double width character */
 #define A_WCONT		0x0100	/* second half: draw nothing */
+#define A_BLINK		0x0200
+#define A_OVER		0x0400	/* overline */
+#define A_ULSTYLE	0x3800	/* with A_UNDER: 0 single, 1 double, 2 curly,
+				   3 dotted, 4 dashed (times 0x0800) */
+#define UL_SHIFT	11
+
+/* a cell's ch with this bit is a character with marks joined to it (an
+** accent, an emoji sequence): the rest is its place in Grid.clu */
+#define CH_CLUSTER	0x80000000u
+/* a piece of an image: bits 16..29 the image's id, 0..15 which piece */
+#define CH_IMAGE	0x40000000u
 
 typedef struct Cell {
   uint32_t ch;	/* code point, 0 = empty */
   uint32_t fg, bg;
   uint16_t attr;
+  uint16_t link;	/* OSC 8 hyperlink: Grid.links[link - 1], 0 = none */
+  uint32_t ul;	/* underline color (SGR 58), COL_DEFAULT: the text color */
 } Cell;
 
 typedef struct Line {
@@ -53,6 +66,14 @@ typedef struct Line {
   int wrapped;	/* continues on the next line */
   int dirty;
 } Line;
+
+typedef struct GridImage {
+  int id;
+  uint32_t *px;	/* 0xAARRGGBB, w * h */
+  int w, h;
+  int cw, ch;	/* the cell size it was placed with, in pixels */
+  int tw;	/* pieces across */
+} GridImage;
 
 typedef struct Grid {
   int cols, rows;
@@ -73,7 +94,20 @@ typedef struct Grid {
   int mouse;	/* 0 off, or the mode: 9, 1000, 1002, 1003 */
   int mouse_sgr;	/* 1006: the report is text, not bytes */
   int cursor_shape;	/* DECSCUSR 0..6 */
+  int sync;	/* 2026: the program is drawing, show the screen once it is done */
+  int origin;	/* DECOM (?6): rows count from the top of the scroll region */
+  int kitty[2][8], kitty_n[2];	/* kitty keyboard flags, a stack per screen */
+  int cell_w, cell_h;	/* pixels of a cell, for images (the window says) */
+  GridImage *images;
+  int nimages, capimages, img_next;
+  size_t img_bytes;
   int all_dirty;
+  int join_next;	/* after a zero width joiner: the next character joins too */
+  uint32_t *clu;	/* clusters: a count, then the code points; see CH_CLUSTER */
+  int nclu, capclu;
+  int *clu_hash, clu_hcap;	/* offsets into clu, to find one again */
+  char **links;	/* hyperlink targets, kept for the life of the grid */
+  int nlinks;
 } Grid;
 
 Grid *grid_new (int cols, int rows, int scrollback);
@@ -81,6 +115,13 @@ void grid_free (Grid *g);
 void grid_reset (Grid *g);
 void grid_resize (Grid *g, int cols, int rows);
 int grid_wcwidth (uint32_t ch);
+int grid_kitty (const Grid *g);
+void grid_put_image (Grid *g, uint32_t *px, int w, int h);	/* at the cursor; takes px */
+const GridImage *grid_image (const Grid *g, uint32_t ch, int *tile);	/* NULL: gone */	/* the kitty keyboard flags now: 1 disambiguate, 8 all keys */
+int grid_cps (const Grid *g, const Cell *c, const uint32_t **cps);	/* code points */
+uint32_t grid_base (const Grid *g, const Cell *c);	/* the first one */
+int grid_link_add (Grid *g, const char *uri);	/* its number, 0 when full */
+const char *grid_link (const Grid *g, int link);
 void grid_putc (Grid *g, uint32_t ch);
 void grid_cr (Grid *g);
 void grid_lf (Grid *g);
@@ -125,6 +166,8 @@ typedef struct Vt {
   int nparams, has_digit;
   char priv, inter;
   Buf osc;
+  Buf dcs;	/* a DCS string (sixel) being read */
+  int in_dcs;
   uint32_t u8cp;
   int u8need;
   uint32_t last;	/* for REP */
@@ -234,10 +277,12 @@ const Glyph *font_glyph (uint32_t cp, int bold, int italic, int dark);
 typedef struct Frame {
   uint32_t *px;	/* 0x00RRGGBB, top row first */
   int w, h;
+  int dy, dh;	/* the rows of pixels the last drawing changed */
 } Frame;
 
 #define MENU_MAX	24
 #define TAB_MAX	32
+#define PANE_MAX	8	/* panes in one tab */
 
 typedef struct Menu {
   int open, x, y, w, h, hot, n;
@@ -263,7 +308,20 @@ typedef struct Scene {	/* everything the renderer needs to know */
   int maximized;
   int cw, ch, ascent;
   int focused, blink_on, cursor_style, no_bold;
+  int text_blink_on;	/* blinking text (SGR 5) is shown now */
   int has_sel, sx0, sy0, sx1, sy1;	/* selection, y in grid_line() terms */
+  int has_hot, hx0, hy0, hx1, hy1;	/* the link under the mouse, the same way */
+  const char *find;	/* the search box, or NULL */
+  int ox, oy;	/* where g starts in pixels; 0: the usual place */
+  int npanes;	/* 2 and more: the tab is split, g is the focused pane */
+  struct {
+    const Grid *g;
+    const Theme *t;
+    int x, y, w, h;	/* in pixels */
+    int focused;
+  } pane[PANE_MAX];
+  int ndivs;	/* the lines between panes: x, y, w, h */
+  int div[PANE_MAX][4];
   int bar_alpha;	/* scrollbar 0..255 */
   const char *pill;	/* size hint while resizing, or NULL */
   const Menu *menu;
@@ -273,6 +331,9 @@ void frame_resize (Frame *f, int w, int h);
 void frame_free (Frame *f);
 int frame_save_bmp (const Frame *f, const char *native);
 void draw_scene (Frame *f, const Scene *s);
+/* only the terminal rows whose lines are dirty (the rest of the scene is
+** as it was drawn last): returns 0 when nothing had to change */
+int draw_scene_rows (Frame *f, const Scene *s);
 void draw_scrollbar_rect (const Frame *f, const Scene *s, int *x, int *y,
                           int *w, int *h);
 void draw_button_rect (const Frame *f, const Scene *s, int i, int *x, int *y,
@@ -381,6 +442,7 @@ void win_flash (void);
 unsigned win_ticks (void);
 float win_scale (void);	/* 1.0 = 96 dpi */
 void win_message (const char *title, const char *text);
+void win_open_url (const char *utf8);	/* in the browser (http, https, mailto) */
 int win_custom_chrome (int want);	/* before win_create; 1: we draw the title bar */
 void win_minimize (void);
 void win_toggle_maximize (void);

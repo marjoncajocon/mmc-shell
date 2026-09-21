@@ -563,6 +563,17 @@ static int b_source (int argc, char **argv, int in, int out, int err) {
     }
     vec_free(&dirs);
   }
+  if (native == NULL && sh_dev_fd(name) >= 0) {	/* source <(cmd), source /dev/stdin */
+    char *tmp = sh_fd_to_file(sh_dev_fd(name));
+    if (tmp == NULL) {
+      sh_error("%s: cannot read", name);
+      return 1;
+    }
+    status = sh_source(tmp, 1, argv + 2, argc - 2);
+    os_unlink(tmp);
+    free(tmp);
+    return status;
+  }
   if (native == NULL) native = path_to_native(name);
   status = sh_source(native, 1, argv + 2, argc - 2);
   free(native);
@@ -900,20 +911,219 @@ static int b_history (int argc, char **argv, int in, int out, int err) {
 }
 
 
-static int b_fc (int argc, char **argv, int in, int out, int err) {
-  int i;
-  for (i = 1; i < argc; i++)
-    if (strcmp(argv[i], "-l") == 0) {
-      char *a[3];
-      a[0] = "history";
-      a[1] = NULL;
-      return b_history(1, a, in, out, err);
-    }
-  sh_error("fc: only fc -l is supported (use the Up key to edit history)");
-  return 1;
+/*
+** fc [-e editor] [-lnr] [first [last]]   list, or edit and run again
+** fc -s [old=new] [command]              run one again, changed
+** first and last: a number (as history shows it), -n (n commands back)
+** or the start of a command.
+*/
+
+/* the history without the line now running (an interactive shell has put it in) */
+static size_t fc_count (void) {
+  const Vec *h = line_hist();
+  return (sh_interactive && h->n > 0) ? h->n - 1 : h->n;
 }
 
 
+/* a history spec to an index 0..count-1; -1 when there is none */
+static long fc_find (const char *spec, size_t count) {
+  const Vec *h = line_hist();
+  long long n;
+  if (count == 0) return -1;
+  if (str_to_ll(spec, &n) == 0) {
+    if (n < 0) n = (long long)count + n;	/* -1: the command before this one */
+    else n = n - 1;
+    if (n < 0) n = 0;	/* like bash: out of range is taken as the end */
+    if (n >= (long long)count) n = (long long)count - 1;
+    return (long)n;
+  }
+  for (n = (long long)count - 1; n >= 0; n--)
+    if (strncmp(h->v[n], spec, strlen(spec)) == 0) return (long)n;
+  return -1;
+}
+
+
+/* old=new everywhere in s */
+static char *fc_subst (const char *s, const char *pat, const char *rep) {
+  Buf b;
+  size_t pl = strlen(pat);
+  buf_init(&b);
+  if (pl == 0) {
+    buf_puts(&b, s);
+    return b.s ? buf_take(&b) : xstrdup("");
+  }
+  while (*s) {
+    if (strncmp(s, pat, pl) == 0) {
+      buf_puts(&b, rep);
+      s += pl;
+    }
+    else buf_putc(&b, *s++);
+  }
+  return b.s ? buf_take(&b) : xstrdup("");
+}
+
+
+/* the commands fc runs take the fc line's place in the history */
+static int fc_run (const char *text, int out) {
+  const Vec *h = line_hist();
+  int status;
+  fd_printf(out, "%s\n", text);
+  if (sh_interactive && h->n > 0) line_hist_delete((int)h->n - 1);
+  if (sh_interactive) {
+    const char *p = text;
+    while (*p) {	/* every line its own entry */
+      size_t n = strcspn(p, "\n");
+      if (n > 0) {
+        char *one = xstrndup(p, n);
+        line_hist_add(one);
+        free(one);
+      }
+      p += n;
+      if (*p == '\n') p++;
+    }
+  }
+  status = sh_run_string(text, "fc", sh_lineno);
+  return status;
+}
+
+
+static int b_fc (int argc, char **argv, int in, int out, int err) {
+  const Vec *h = line_hist();
+  const char *editor = NULL;
+  int list = 0, nonum = 0, rev = 0, redo = 0, i;
+  size_t count = fc_count();
+  long first, last;
+  (void)in; (void)err;
+  for (i = 1; i < argc; i++) {
+    const char *a = argv[i];
+    if (strcmp(a, "--") == 0) {
+      i++;
+      break;
+    }
+    if (a[0] != '-' || a[1] == '\0' || isdigit((unsigned char)a[1])) break;	/* -3 is a spec */
+    if (strcmp(a, "-e") == 0) {
+      if (++i >= argc) {
+        sh_error("fc: -e: option requires an argument");
+        return 2;
+      }
+      editor = argv[i];
+      continue;
+    }
+    for (a++; *a; a++) {
+      if (*a == 'l') list = 1;
+      else if (*a == 'n') nonum = 1;
+      else if (*a == 'r') rev = 1;
+      else if (*a == 's') redo = 1;
+      else {
+        sh_error("fc: -%c: invalid option", *a);
+        fd_puts(2, "fc: usage: fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]\n");
+        return 2;
+      }
+    }
+  }
+  if (editor != NULL && strcmp(editor, "-") == 0) redo = 1;	/* fc -e - is fc -s */
+  if (redo) {	/* fc -s [old=new] [command] */
+    const char *pat = NULL, *eq = NULL;
+    char *cmd, *p = NULL;
+    long at;
+    if (i < argc && strchr(argv[i], '=') != NULL) {
+      pat = argv[i++];
+      eq = strchr(pat, '=');
+    }
+    at = fc_find(i < argc ? argv[i] : "-1", count);
+    if (at < 0) {
+      sh_error("fc: no command found");
+      return 1;
+    }
+    if (pat != NULL) {
+      p = xstrndup(pat, (size_t)(eq - pat));
+      cmd = fc_subst(h->v[at], p, eq + 1);
+      free(p);
+    }
+    else cmd = xstrdup(h->v[at]);
+    i = fc_run(cmd, out);
+    free(cmd);
+    return i;
+  }
+  if (count == 0) {
+    if (list) return 0;
+    sh_error("fc: no command found");
+    return 1;
+  }
+  first = fc_find(i < argc ? argv[i] : (list ? "-16" : "-1"), count);
+  last = (i + 1 < argc) ? fc_find(argv[i + 1], count) :
+         (list ? (long)count - 1 : first);
+  if (first < 0 || last < 0) {
+    sh_error("fc: history specification out of range");
+    return 1;
+  }
+  if (first > last) {	/* backwards: show them that way */
+    long t = first;
+    first = last;
+    last = t;
+    rev = !rev;
+  }
+  if (list) {
+    long k;
+    for (k = 0; k <= last - first; k++) {
+      long at = rev ? last - k : first + k;
+      if (nonum) fd_printf(out, "\t %s\n", h->v[at]);
+      else fd_printf(out, "%ld\t %s\n", at + 1, h->v[at]);
+    }
+    return 0;
+  }
+  {	/* into the editor, then run what was saved */
+    char name[64], *dir, *file, *q, *cmd, *text;
+    int fd, status;
+    long k;
+    if (editor == NULL || *editor == '\0') editor = var_get("FCEDIT");
+    if (editor == NULL || *editor == '\0') editor = var_get("EDITOR");
+    if (editor == NULL || *editor == '\0') {
+#ifdef _WIN32
+      editor = "notepad";
+#else
+      editor = "vi";
+#endif
+    }
+    dir = path_tmpdir();
+    sprintf(name, "mmc-fc-%ld.sh", os_getpid());
+    file = path_join(dir, name);
+    free(dir);
+    fd = os_open(file, OS_WRITE);
+    if (fd < 0) {
+      sh_error("fc: cannot make a temporary file");
+      free(file);
+      return 1;
+    }
+    for (k = 0; k <= last - first; k++) fd_printf(fd, "%s\n", h->v[rev ? last - k : first + k]);
+    os_close(fd);
+    q = shell_quote(file);
+    cmd = xstrcat3(editor, " ", q);	/* the editor unquoted: "code --wait" is two words */
+    status = sh_run_string(cmd, "fc", sh_lineno);
+    free(cmd);
+    free(q);
+    text = read_file(file, NULL);
+    os_unlink(file);
+    free(file);
+    if (status != 0) {
+      free(text);
+      return status;
+    }
+    if (text == NULL) return 1;
+    {	/* CRLF from a Windows editor; no empty lines at the end */
+      char *r, *w;
+      size_t n;
+      for (r = w = text; *r; r++)
+        if (!(r[0] == '\r' && r[1] == '\n')) *w++ = *r;
+      *w = '\0';
+      n = strlen(text);
+      while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == ' ')) text[--n] = '\0';
+    }
+    status = text[0] ? fc_run(text, out) : 0;
+    free(text);
+    return status;
+  }
+}
 static Vec disabled;
 
 

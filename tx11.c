@@ -481,9 +481,11 @@ static void present (void) {
                            (char *)last->px, (unsigned)last->w,
                            (unsigned)last->h, 32, 0);
   }
-  if (image != NULL)
-    X.XPutImage(dpy, win, gc, image, 0, 0, 0, 0, (unsigned)last->w,
-                (unsigned)last->h);
+  if (image != NULL) {
+    int y = (f != NULL && f->dh > 0) ? f->dy : 0;	/* a new frame: what changed */
+    int hh = (f != NULL && f->dh > 0) ? f->dh : last->h;	/* an expose: all of it */
+    X.XPutImage(dpy, win, gc, image, 0, y, 0, y, (unsigned)last->w, (unsigned)hh);
+  }
   X.XFlush(dpy);
 }
 
@@ -605,6 +607,26 @@ void win_request_paste (void) {
 
 void win_message (const char *title, const char *text) {
   fprintf(stderr, "%s: %s\n", title, text);
+}
+
+
+/* the desktop's own opener takes it to the browser */
+void win_open_url (const char *utf8) {
+  static const char *const openers[] = {"/usr/bin/xdg-open", "/usr/local/bin/xdg-open", "/bin/xdg-open", NULL};
+  static const int fds[3] = {0, 1, 2};
+  int i;
+  for (i = 0; openers[i] != NULL; i++) {
+    OsStat st;
+    char *argv[3];
+    OsProc proc;
+    long pid;
+    if (os_stat(openers[i], &st) != 0) continue;
+    argv[0] = (char *)openers[i];
+    argv[1] = (char *)utf8;
+    argv[2] = NULL;
+    if (os_spawn(openers[i], argv, NULL, fds, 3, &proc, &pid) == 0) os_detach(proc);
+    return;
+  }
 }
 
 

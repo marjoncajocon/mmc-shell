@@ -515,10 +515,51 @@ static int is_digits_n (const char *s, size_t n) {
 }
 
 
+/* /dev/stdin, /dev/stdout, /dev/stderr, /dev/fd/N: our fd N; else -1 */
+int sh_dev_fd (const char *path) {
+  if (strcmp(path, "/dev/stdin") == 0) return 0;
+  if (strcmp(path, "/dev/stdout") == 0) return 1;
+  if (strcmp(path, "/dev/stderr") == 0) return 2;
+  if (strncmp(path, "/dev/fd/", 8) == 0 && path[8] != '\0' &&
+      is_digits_n(path + 8, strlen(path + 8)) && strlen(path + 8) < 6)
+    return atoi(path + 8);
+  return -1;
+}
+
+
+/* what fd N holds, read to its end into a temporary file (source <(cmd)) */
+char *sh_fd_to_file (int k) {
+  char *dir = path_tmpdir(), name[64], *file, buf[16384];
+  int fd;
+  long n;
+  static int counter = 0;
+  sprintf(name, "mmc-fd-%ld-%d", os_getpid(), ++counter);
+  file = path_join(dir, name);
+  free(dir);
+  fd = os_open(file, OS_WRITE);
+  if (fd < 0) {
+    free(file);
+    return NULL;
+  }
+  if (k >= 0 && k < MMC_FDS && sh_fd[k] >= 0)
+    while ((n = os_read(sh_fd[k], buf, sizeof(buf))) > 0) os_write(fd, buf, (size_t)n);
+  os_close(fd);
+  return file;
+}
+
+
 static int open_target (const char *target, int op) {
-  char *native = path_to_native(target);
-  int fd, mode;
+  char *native;
+  int fd, mode, k = sh_dev_fd(target);
   OsStat st;
+  if (k >= 0) {	/* one of our own fds: the same file (the real /dev/fd would miss our redirections) */
+    if (k >= MMC_FDS || sh_fd[k] < 0 || (fd = os_dup(sh_fd[k])) < 0) {
+      sh_error("%s: Bad file descriptor", target);
+      return -1;
+    }
+    return fd;
+  }
+  native = path_to_native(target);
   if (op == R_IN) mode = OS_READ;
   else if (op == R_RW) mode = OS_RDWR;
   else if (op == R_APPEND || op == R_BOTHAPP) mode = OS_APPEND;
@@ -540,6 +581,14 @@ static int open_target (const char *target, int op) {
   }
   free(native);
   return fd;
+}
+
+
+/* the value of the variable of {var}> or {arr[i]}> */
+static char *fdvar_get (const char *name) {
+  char *raw = xstrcat3("${", name, "}"), *v = expand_str(raw);
+  free(raw);
+  return v;
 }
 
 
@@ -595,8 +644,9 @@ static int apply_redirs (Redir *r, Saves *sv) {
         if (strcmp(target, "-") == 0) {	/* n>&- closes */
           free(target);
           if (r->fdvar != NULL) {	/* {var}>&-: the one in $var */
-            const char *v = var_get(r->fdvar);
-            k = v ? atoi(v) : -1;
+            char *v = fdvar_get(r->fdvar);
+            k = v[0] ? atoi(v) : -1;
+            free(v);
             if (k < 0 || k >= MMC_FDS) continue;
             fd_set_k(k, -1, 0, NULL);
             continue;
@@ -655,9 +705,11 @@ static int apply_redirs (Redir *r, Saves *sv) {
       sv->feeders[sv->nfeeders++] = th;
     else if (th != NULL) os_thread_join(th);
     if (r->fdvar != NULL) {	/* {var}> stays open, like bash */
-      char num[24];
+      char num[24], *w;
       fd_set_k(k, fd, 1, NULL);
-      var_set(r->fdvar, ll_to_str(k, num));
+      w = xstrcat3(r->fdvar, "=", ll_to_str(k, num));	/* var or arr[i] */
+      assign_word(w, 0, 0);
+      free(w);
     }
     else fd_set_k(k, fd, 1, sv);
   }
@@ -682,6 +734,65 @@ Func *func_find (const char *name) {
   for (f = funcs; f != NULL; f = f->next)
     if (strcmp(f->name, name) == 0) return f;
   return NULL;
+}
+
+
+/* export -f: every exported function, the way bash passes them on */
+void func_env (Vec *out) {
+  Func *f;
+  for (f = funcs; f != NULL; f = f->next) {
+    char *text, *eq;
+    if (!(f->flags & V_EXPORT)) continue;
+    text = func_pretty(f);	/* "name () \n{ ... }": bash wants "() { ..." */
+    eq = xstrcat3("BASH_FUNC_", f->name, "%%=() ");
+    vec_push(out, xstrcat3(eq, text + strlen(f->name) + 5, ""));
+    free(eq);
+    free(text);
+  }
+}
+
+
+/*
+** Functions a parent shell exported. The value must be exactly one
+** function definition: anything after it would run (bash's Shellshock),
+** so such a value is left alone.
+*/
+void func_import_env (void) {
+  Vec env;
+  size_t i;
+  vec_init(&env);
+  var_env_funcs(&env);
+  for (i = 0; i < env.n; i++) {
+    char *e = env.v[i] + 10, *pct = strstr(e, "%%="), *name, *text;
+    Parser *p;
+    Node *n = NULL, *rest = NULL;
+    if (pct == NULL || strncmp(pct + 3, "() ", 3) != 0) continue;
+    name = xstrndup(e, (size_t)(pct - e));
+    if (!is_name(name) || parse_is_keyword(name)) {
+      free(name);
+      continue;
+    }
+    text = xstrcat3(name, " ", pct + 3);
+    p = parse_new(text, "environment", 1);
+    if (parse_next(p, &n) == P_OK && n != NULL) {
+      Node *fn = (n->type == N_LIST && n->nkids == 1) ? n->kids[0] : n;
+      if (fn->type == N_FUNC && fn->str != NULL && strcmp(fn->str, name) == 0 &&
+          !(fn->flags & NF_BG) && fn->redir == NULL) {
+        Prog *keep = fn->a->prog;
+        prog_ref(keep);	/* the next parse_next lets go of this one */
+        if (parse_next(p, &rest) == P_EOF) {	/* nothing after it */
+          Func *f;
+          func_define(name, fn->a, fn->src);
+          if ((f = func_find(name)) != NULL) f->flags |= V_EXPORT;
+        }
+        prog_unref(keep);
+      }
+    }
+    parse_free(p);
+    free(text);
+    free(name);
+  }
+  vec_free(&env);
 }
 
 
@@ -1539,16 +1650,41 @@ static char *msys_arg (const char *arg) {
 
 
 /* runs a program with the shell's descriptors; 'async': does not wait */
+#ifdef _WIN32
+static void psub_files (Vec *args);
+static int psub_fd (int k);
+#endif
+
+
+/* job control applies: an interactive shell on a terminal, not in ( ) or $( ) */
+static int job_control_here (void) {
+  return sh_interactive && sh_subshell == 0 && os_job_active();
+}
+
+
+static char *join_words (const Vec *v) {
+  Buf b;
+  size_t i;
+  buf_init(&b);
+  for (i = 0; i < v->n; i++) {
+    if (i > 0) buf_putc(&b, ' ');
+    buf_puts(&b, v->v[i]);
+  }
+  return b.s ? buf_take(&b) : xstrdup("");
+}
+
+
 static int run_external (const char *exe, Vec *argv, int async, OsProc *proc_out,
                          long *pid_out) {
   Vec env, args;
   OsProc proc;
   long pid = 0;
-  int fds[MMC_FDS], nfds, i, r, nul_fd = -1;
+  int fds[MMC_FDS], nfds, i, r, nul_fd = -1, jc, stopped = 0;
   char *prog = xstrdup(exe);
   vec_init(&args);
   vec_copy(&args, argv->v, argv->n);
 #ifdef _WIN32
+  psub_files(&args);	/* <( ) and >( ): a file for a program */
   if (!has_exe_ext(prog)) {	/* a "#!" script: run its interpreter */
     char *iarg = NULL;
     char *interp = script_interp(prog, &iarg);
@@ -1592,7 +1728,10 @@ static int run_external (const char *exe, Vec *argv, int async, OsProc *proc_out
   nfds = 3;
   for (i = 0; i < MMC_FDS; i++) {
     fds[i] = sh_fd[i];
-    if (sh_fd[i] >= 0 && i >= nfds) nfds = i + 1;
+#ifdef _WIN32
+    if (i >= 3 && psub_fd(i)) fds[i] = -1;	/* a >( ) reader would never see the end */
+#endif
+    if (fds[i] >= 0 && i >= nfds) nfds = i + 1;
   }
   if (async && !sh_interactive && sh_fd[0] == 0) {	/* cmd & reads /dev/null */
     char *nul = path_to_native("/dev/null");
@@ -1602,18 +1741,35 @@ static int run_external (const char *exe, Vec *argv, int async, OsProc *proc_out
   }
   vec_init(&env);
   var_env(&env);
+  jc = !async && job_control_here();
+  if (jc) os_job_pgid(0);	/* a process group of its own */
   r = os_spawn(prog, args.v, env.v, fds, nfds, &proc, &pid);
+  if (jc) os_job_pgid(-1);
   if (nul_fd >= 0) os_close(nul_fd);
   vec_free(&env);
-  vec_free(&args);
   free(prog);
-  if (r != 0) return 126;
+  if (r != 0) {
+    vec_free(&args);
+    return 126;
+  }
   if (async) {
+    vec_free(&args);
     if (proc_out) *proc_out = proc;
     if (pid_out) *pid_out = pid;
     return 0;
   }
-  return normalize_status(os_wait(proc));
+  if (jc) os_tty_give(pid);
+  r = os_wait_fg(proc, &stopped);
+  if (jc) os_tty_give(0);
+  if (stopped) {	/* Ctrl-Z: it waits as a job, the prompt comes back */
+    char *cmd = join_words(argv);
+    job_stopped(cmd, &proc, &pid, 1, pid);
+    free(cmd);
+    vec_free(&args);
+    return r;
+  }
+  vec_free(&args);
+  return normalize_status(r);
 }
 
 
@@ -1777,6 +1933,7 @@ static int exec_simple (Node *n) {
   Vec argv;
   Saves sv;
   int status;
+  void *mark = sh_procsubst_mark();
   sh_set_lineno(n->line);
   memset(&sv, 0, sizeof(sv));
   vec_init(&argv);
@@ -1784,7 +1941,7 @@ static int exec_simple (Node *n) {
   if (expand_command(n, &argv) != 0 || expand_failed()) {
     vec_free(&argv);
     if (!sh_interactive) sh_exit = 1;
-    sh_procsubst_cleanup();
+    sh_procsubst_cleanup_to(mark);
     return 1;
   }
   if (argv.n == 0) {	/* only assignments and redirections */
@@ -1794,7 +1951,7 @@ static int exec_simple (Node *n) {
     fd_restore(&sv);
     if (status == 0) status = assign_only(n);
     vec_free(&argv);
-    sh_procsubst_cleanup();
+    sh_procsubst_cleanup_to(mark);
     return status;
   }
   if (O("xtrace")) xtrace(argv.v, (int)argv.n, n->assigns, n->nassigns);
@@ -1807,14 +1964,14 @@ static int exec_simple (Node *n) {
   if (apply_redirs(n->redir, &sv) != 0) {
     fd_restore(&sv);
     vec_free(&argv);
-    sh_procsubst_cleanup();
+    sh_procsubst_cleanup_to(mark);
     return 1;
   }
   status = run_argv(&argv, n->assigns, n->nassigns, 0);
   var_set("_", argv.v[argv.n - 1]);	/* $_: the last argument */
   fd_restore(&sv);
   vec_free(&argv);
-  sh_procsubst_cleanup();
+  sh_procsubst_cleanup_to(mark);
   return status;
 }
 
@@ -1927,6 +2084,62 @@ static void run_middle_builtin (Stage *st, OsThread **feeder) {
 }
 
 
+/*
+** What "time" prints: $TIMEFORMAT like bash. %[p][l]R, U, S are the real,
+** user and system seconds (p decimals, 0..3, default 3; l: 1m2.345s),
+** %P the CPU share, %% a percent sign. Unset: bash's layout; empty:
+** nothing. time -p always uses the POSIX layout.
+*/
+static void time_report (double real, double user, double sys, int posix) {
+  const char *f = posix ? "real %2R\nuser %2U\nsys %2S" : var_get("TIMEFORMAT");
+  Buf b;
+  if (f == NULL) f = "\nreal\t%3lR\nuser\t%3lU\nsys\t%3lS";
+  if (*f == '\0') return;
+  buf_init(&b);
+  for (; *f; f++) {
+    int prec = 3, lng = 0;
+    const char *start = f;
+    double v;
+    char num[64];
+    if (*f != '%') {
+      buf_putc(&b, *f);
+      continue;
+    }
+    f++;
+    if (*f == '%') {
+      buf_putc(&b, '%');
+      continue;
+    }
+    if (*f == 'P') {
+      sprintf(num, "%.2f", real > 0 ? (user + sys) * 100.0 / real : 0.0);
+      buf_puts(&b, num);
+      continue;
+    }
+    if (*f >= '0' && *f <= '9') {
+      prec = *f - '0';
+      if (prec > 3) prec = 3;
+      f++;
+    }
+    if (*f == 'l') {
+      lng = 1;
+      f++;
+    }
+    if (*f != 'R' && *f != 'U' && *f != 'S') {	/* not a format: as it is */
+      buf_putn(&b, start, (size_t)(f - start + (*f != '\0')));
+      if (*f == '\0') break;
+      continue;
+    }
+    v = (*f == 'R') ? real : (*f == 'U') ? user : sys;
+    if (lng) sprintf(num, "%dm%.*fs", (int)(v / 60), prec, v - 60 * (int)(v / 60));
+    else sprintf(num, "%.*f", prec, v);
+    buf_puts(&b, num);
+  }
+  buf_putc(&b, '\n');
+  os_write(sh_fd[2], b.s, b.len);
+  buf_free(&b);
+}
+
+
 static int exec_pipeline (Node *pn) {
   int n = pn->nkids, i, status = 0;
   long long t0 = 0;
@@ -1943,6 +2156,9 @@ static int exec_pipeline (Node *pn) {
     var_aset("PIPESTATUS", 0, ll_to_str(status, num));
   }
   else if (n > 1) {
+    void *mark = sh_procsubst_mark();
+    int jc = job_control_here(), stopped_at = -1;
+    long pgid = 0;
     Stage *st = (Stage *)xmalloc((size_t)n * sizeof(Stage));
     int (*pipes)[2] = (int (*)[2])xmalloc((size_t)n * sizeof(*pipes));
     OsThread **feeders = (OsThread **)xmalloc((size_t)n * sizeof(OsThread *));
@@ -1975,6 +2191,7 @@ static int exec_pipeline (Node *pn) {
       s->in_shell = !s->external;
     }
     /* 1. programs, and shell code in the middle (a child mmc) */
+    if (jc) os_job_pgid(0);	/* the first one makes the group, the others join */
     for (i = 0; i < n; i++) {
       Stage *s = &st[i];
       if (s->failed) {
@@ -1993,7 +2210,13 @@ static int exec_pipeline (Node *pn) {
           s->in_shell = 0;
         }
       }
+      if (jc && s->spawned && pgid == 0) {
+        pgid = s->pid;
+        os_job_pgid(pgid);
+      }
     }
+    if (jc) os_job_pgid(-1);
+    if (jc && pgid != 0 && !st[n - 1].in_shell) os_tty_give(pgid);
     /* our copies of the pipe ends of running stages go, so EOF can come */
     for (i = 0; i < n - 1; i++) {
       if (!st[i].in_shell && pipes[i][1] >= 0) {
@@ -2030,9 +2253,31 @@ static int exec_pipeline (Node *pn) {
       }
     }
     /* 4. wait for everything */
+    if (jc && pgid != 0) os_tty_give(pgid);
     for (i = 0; i < n; i++) {
-      if (st[i].spawned) st[i].status = normalize_status(os_wait(st[i].proc));
-      if (feeders[i] != NULL) os_thread_join(feeders[i]);
+      if (st[i].spawned && stopped_at < 0) {
+        int s = 0, r = os_wait_fg(st[i].proc, &s);
+        if (s) stopped_at = i;	/* Ctrl-Z: the rest is stopped too */
+        st[i].status = s ? r : normalize_status(r);
+        if (s) continue;
+        st[i].spawned = 0;
+      }
+      /* a builtin feeding a stopped program would wait for ever: let it be */
+      if (feeders[i] != NULL && stopped_at < 0) os_thread_join(feeders[i]);
+    }
+    if (jc && pgid != 0) os_tty_give(0);
+    if (stopped_at >= 0) {	/* what still runs becomes a stopped job */
+      OsProc *procs = (OsProc *)xmalloc((size_t)n * sizeof(OsProc));
+      long *pids = (long *)xmalloc((size_t)n * sizeof(long));
+      int np = 0;
+      for (i = 0; i < n; i++)
+        if (st[i].spawned) {
+          procs[np] = st[i].proc;
+          pids[np++] = st[i].pid;
+        }
+      if (np > 0) job_stopped(pn->src ? pn->src : "", procs, pids, np, pgid);
+      free(procs);
+      free(pids);
     }
     for (i = 0; i < n - 1; i++) {
       if (pipes[i][0] >= 0) os_close(pipes[i][0]);
@@ -2053,7 +2298,7 @@ static int exec_pipeline (Node *pn) {
     free(st);
     free(pipes);
     free(feeders);
-    sh_procsubst_cleanup();
+    sh_procsubst_cleanup_to(mark);
   }
   if (pn->flags & NF_NEGATE) {
     no_errexit--;
@@ -2064,13 +2309,7 @@ static int exec_pipeline (Node *pn) {
     os_times(tm1);
     user = (tm1[0] - tm0[0]) + (tm1[2] - tm0[2]);
     sys = (tm1[1] - tm0[1]) + (tm1[3] - tm0[3]);
-    if (pn->flags & NF_TIMEP)
-      fd_printf(sh_fd[2], "real %.2f\nuser %.2f\nsys %.2f\n", real, user, sys);
-    else
-      fd_printf(sh_fd[2], "\nreal\t%dm%.3fs\nuser\t%dm%.3fs\nsys\t%dm%.3fs\n",
-                (int)(real / 60), real - 60 * (int)(real / 60),
-                (int)(user / 60), user - 60 * (int)(user / 60),
-                (int)(sys / 60), sys - 60 * (int)(sys / 60));
+    time_report(real, user, sys, (pn->flags & NF_TIMEP) != 0);
   }
   return status;
 }
@@ -2093,7 +2332,76 @@ static void report_bg (long pid) {
 }
 
 
+/*
+** coproc [NAME] command: runs in the background with a pipe to its input
+** and one from its output. NAME[1] is the fd to write to it, NAME[0] the
+** fd to read from it, NAME_PID its process (NAME is COPROC by default).
+*/
+static int exec_coproc (Node *n) {
+  const char *name = n->str ? n->str : "COPROC";
+  int to[2], from[2], kr, kw;
+  OsProc proc;
+  long pid = 0;
+  char num[24], pidname[128];
+  if (n->a == NULL || n->a->src == NULL) {
+    sh_error("coproc: nothing to run");
+    return 1;
+  }
+  for (kr = 10; kr < MMC_FDS && sh_fd[kr] >= 0; kr++)	/* two free fds from 10 */
+    ;
+  for (kw = kr + 1; kw < MMC_FDS && sh_fd[kw] >= 0; kw++)
+    ;
+  if (kw >= MMC_FDS) {
+    sh_error("coproc: too many open files");
+    return 1;
+  }
+  if (os_pipe(to) != 0) {
+    sh_error("coproc: cannot make a pipe");
+    return 1;
+  }
+  if (os_pipe(from) != 0) {
+    os_close(to[0]);
+    os_close(to[1]);
+    sh_error("coproc: cannot make a pipe");
+    return 1;
+  }
+  if (spawn_stage(n->a->src, to[0], from[1], sh_fd[2], &proc, &pid) != 0) {
+    os_close(to[0]);
+    os_close(to[1]);
+    os_close(from[0]);
+    os_close(from[1]);
+    return 1;
+  }
+  os_close(to[0]);	/* the child's ends */
+  os_close(from[1]);
+  fd_set_k(kr, from[0], 1, NULL);
+  fd_set_k(kw, to[1], 1, NULL);
+  var_make_array(name, 0);
+  var_aset(name, 0, ll_to_str(kr, num));
+  var_aset(name, 1, ll_to_str(kw, num));
+  snprintf(pidname, sizeof(pidname), "%s_PID", name);
+  var_set(pidname, ll_to_str(pid, num));
+  job_add(n->a->src, &proc, &pid, 1);
+  report_bg(pid);
+  return 0;
+}
+
+
+static int start_background (Node *n);
+
+
+/* cmd &: under job control a process group of its own, so Ctrl-C and
+** Ctrl-Z at the terminal leave it alone */
 static int exec_background (Node *n) {
+  int r, jc = job_control_here();
+  if (jc) os_job_pgid(0);
+  r = start_background(n);
+  if (jc) os_job_pgid(-1);
+  return r;
+}
+
+
+static int start_background (Node *n) {
   OsProc proc;
   long pid = 0;
   if (n->type == N_SIMPLE && n->nwords > 0) {	/* one program: start it, go on */
@@ -2439,8 +2747,7 @@ static int exec_node (Node *n) {
       sh_errexit_check(status);
       break;
     case N_COPROC:
-      sh_error("coproc: not supported by mmc (use cmd & with a fifo or file)");
-      status = 1;
+      status = sh_status = exec_coproc(n);
       break;
   }
   if (n->type != N_SIMPLE && n->type != N_FUNC && n->redir != NULL) fd_restore(&sv);
@@ -2620,73 +2927,177 @@ int sh_loop_depth (void) {
 
 /*
 ** {==================================================================
-** Process substitution: <( ) and >( ) through temporary files
+** Process substitution: <( ) and >( ). The command runs in a child mmc
+** at once, joined to us by a pipe, so its data streams: <(tail -f log)
+** works. Elsewhere the path is a FIFO every program can open. On Windows
+** it is /dev/fd/N, one of our own fds: our redirections, source, read and
+** mapfile use the pipe as it is; a program gets a temporary file instead
+** (Windows programs cannot open a pipe by a name), filled before it starts.
 ** ===================================================================
 */
 
 typedef struct PSub {
-  char *native;
-  char *src;	/* >( ): runs after the command, the file as its input */
+  int write;	/* >( ): waited for, so its output is there when we go on */
+  OsProc proc;
+#ifdef _WIN32
+  int k;	/* our fd number: /dev/fd/k */
+  char *file;	/* a program got this file instead */
+#else
+  OsNPipe *np;
+#endif
   struct PSub *next;
 } PSub;
 
 static PSub *psubs = NULL;
-static int psub_counter = 0;
 
 
 char *sh_procsubst (const char *src, int write) {
-  char *dir = path_tmpdir(), name[64], *native;
+  int p[2];
+  OsProc proc;
+  long pid = 0;
   PSub *ps;
-  int fd;
-  sprintf(name, "mmc-ps-%ld-%d", os_getpid(), ++psub_counter);
-  native = path_join(dir, name);
-  free(dir);
-  fd = os_open(native, OS_WRITE);
-  if (fd < 0) {
-    sh_error("cannot write %s", native);
-    free(native);
+#ifdef _WIN32
+  int k;
+  char name[32];
+  for (k = MMC_FDS - 1; k >= 10 && sh_fd[k] >= 0; k--)	/* 63 down, like bash */
+    ;
+  if (k < 10) {
+    sh_error("too many open files");
     return NULL;
   }
-  if (!write) {	/* <( cmd ): its output, ready before the command starts */
-    size_t len = 0;
-    char *out = sh_capture(src, &len);
-    os_write(fd, out, len);
-    free(out);
+#else
+  OsNPipe *np;
+  char *path = NULL, *shown;
+#endif
+  if (os_pipe(p) != 0) {
+    sh_error("cannot make a pipe");
+    return NULL;
   }
-  os_close(fd);
+  if (spawn_stage(src, write ? p[0] : sh_fd[0], write ? sh_fd[1] : p[1], sh_fd[2],
+                  &proc, &pid) != 0) {
+    os_close(p[0]);
+    os_close(p[1]);
+    return NULL;
+  }
+  os_close(write ? p[0] : p[1]);	/* the child's end */
   ps = (PSub *)xmalloc(sizeof(PSub));
-  ps->native = native;
-  ps->src = write ? xstrdup(src) : NULL;
+  memset(ps, 0, sizeof(*ps));
+  ps->write = write;
+  ps->proc = proc;
+#ifdef _WIN32
+  fd_set_k(k, write ? p[1] : p[0], 1, NULL);
+  ps->k = k;
   ps->next = psubs;
   psubs = ps;
-  return path_to_display(native);
+  sprintf(name, "/dev/fd/%d", k);
+  return xstrdup(name);
+#else
+  {
+    char *dir = path_tmpdir();
+    np = os_npipe_new(dir, write ? p[1] : p[0], !write, &path);
+    free(dir);
+  }
+  if (np == NULL) {
+    sh_error("cannot make a named pipe");
+    os_close(write ? p[1] : p[0]);
+    os_detach(proc);
+    free(ps);
+    return NULL;
+  }
+  ps->np = np;
+  ps->next = psubs;
+  psubs = ps;
+  shown = path_to_display(path);
+  free(path);
+  return shown;
+#endif
+}
+
+
+#ifdef _WIN32
+/* /dev/fd/k of a process substitution, or NULL */
+static PSub *psub_of (const char *arg) {
+  PSub *ps;
+  if (strncmp(arg, "/dev/fd/", 8) != 0 || !is_digits_n(arg + 8, strlen(arg + 8))) return NULL;
+  for (ps = psubs; ps != NULL; ps = ps->next)
+    if (ps->k == atoi(arg + 8) && ps->file == NULL) return ps;
+  return NULL;
+}
+
+
+/* is fd k the pipe of a process substitution? */
+static int psub_fd (int k) {
+  PSub *ps;
+  for (ps = psubs; ps != NULL; ps = ps->next)
+    if (ps->k == k) return 1;
+  return 0;
+}
+
+
+/*
+** A program is about to get these arguments: every /dev/fd/k of ours
+** becomes a temporary file. <( ): what the command wrote, all of it
+** (so it has to end); >( ): an empty file, the command reads it after.
+*/
+static void psub_files (Vec *args) {
+  size_t i;
+  for (i = 1; i < args->n; i++) {
+    PSub *ps = psub_of(args->v[i]);
+    char *dir, name[64];
+    int fd;
+    if (ps == NULL) continue;
+    dir = path_tmpdir();
+    sprintf(name, "mmc-ps-%ld-%d", os_getpid(), ps->k);
+    ps->file = path_join(dir, name);
+    free(dir);
+    fd = os_open(ps->file, OS_WRITE);
+    if (fd < 0) continue;
+    if (!ps->write) {
+      char buf[16384];
+      long n;
+      while ((n = os_read(sh_fd[ps->k], buf, sizeof(buf))) > 0) os_write(fd, buf, (size_t)n);
+      fd_set_k(ps->k, -1, 0, NULL);
+    }
+    os_close(fd);
+    free(args->v[i]);
+    args->v[i] = path_to_display(ps->file);
+  }
+}
+#endif
+
+
+/* what the list is now: a command cleans up only what it made itself */
+void *sh_procsubst_mark (void) {
+  return psubs;
 }
 
 
 void sh_procsubst_cleanup (void) {
-  while (psubs != NULL) {
+  sh_procsubst_cleanup_to(NULL);
+}
+
+
+void sh_procsubst_cleanup_to (void *mark) {
+  while (psubs != NULL && psubs != (PSub *)mark) {
     PSub *ps = psubs;
     psubs = ps->next;
-    if (ps->src != NULL) {	/* >( cmd ): now cmd reads what was written */
+#ifdef _WIN32
+    if (ps->write && ps->file != NULL) {	/* >( cmd ) now reads what the program wrote */
       size_t len = 0;
-      char *data = read_file(ps->native, &len);
-      if (data != NULL) {
-        OsThread *th = NULL;
-        int fd = feed_pipe(data, len, &th);
-        if (fd >= 0) {
-          State s;
-          state_save(&s);
-          sh_fd[0] = fd;
-          sh_run_string(ps->src, sh_source_name, sh_lineno);
-          state_restore(&s);
-          os_close(fd);
-          if (th) os_thread_join(th);
-        }
-      }
+      char *data = read_file(ps->file, &len);
+      if (data != NULL && sh_fd[ps->k] >= 0) os_write(sh_fd[ps->k], data, len);
+      free(data);
     }
-    os_unlink(ps->native);
-    free(ps->native);
-    free(ps->src);
+    if (sh_fd[ps->k] >= 0) fd_set_k(ps->k, -1, 0, NULL);	/* its end of input */
+    if (ps->file != NULL) {
+      os_unlink(ps->file);
+      free(ps->file);
+    }
+#else
+    os_npipe_end(ps->np);
+#endif
+    if (ps->write) os_wait(ps->proc);	/* >( cmd ): it has read it all */
+    else os_detach(ps->proc);	/* <( cmd ) may go on; nobody reads it any more */
     free(ps);
   }
 }

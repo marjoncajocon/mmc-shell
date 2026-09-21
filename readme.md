@@ -77,7 +77,7 @@ Android has no `/tmp`). mmc-term needs X11 or Cocoa, so Android gets the shell.
 | `mbvars.c` | `declare local export readonly unset set shopt shift getopts let` |
 | `mbio.c` | `echo printf read mapfile` |
 | `mbtest.c` | `test`, `[`, `[[ ]]` |
-| `mline.c` | line editor: history, Ctrl-R search, Tab completion, UTF-8 |
+| `mline.c` | line editor: history, Ctrl-R search, Tab completion, kill ring, undo, UTF-8 |
 | `mcomp.c` | programmable completion: `complete`, `compgen`, `compopt` |
 | `mpath.c` | Linux style paths on Windows (`/d/env` = `D:\env`) |
 | `mos.c` | everything that differs between Windows and Linux/macOS |
@@ -133,9 +133,14 @@ mmc-term --render-test a.bmp draw a sample into an image, no window
 |---|---|
 | Ctrl+Shift+C / Ctrl+Shift+V | copy / paste (also Ctrl+Insert / Shift+Insert, middle click pastes) |
 | drag, double click, triple click | select text, a word, a line — selecting copies |
+| Ctrl+Shift+F | find in the screen and the scrollback: type, Enter / Up for the next match up, Shift+Enter / Down back down, Esc closes |
+| Ctrl+click | open the link under the mouse (web and mail addresses; the mouse underlines them) |
 | wheel, Shift+PgUp / PgDn | scroll back (10 000 lines); Ctrl+Shift+Home / End: top / bottom |
 | Ctrl + / Ctrl - / Ctrl 0, Ctrl+wheel | bigger, smaller, normal text |
-| Ctrl+Shift+T / Ctrl+Shift+W | new tab / close tab (closing the last one closes the window) |
+| Ctrl+Shift+T / Ctrl+Shift+W | new tab / close the pane, or the tab when it has one pane (closing the last one closes the window) |
+| Ctrl+Shift+D / Ctrl+Shift+E | split the pane: side by side / one above the other (up to 8 panes, each its own shell; also in the menu) |
+| Alt+arrow, or a click | the pane next to this one gets the keys |
+| drag the line between panes | give one pane more room |
 | Ctrl+Tab / Ctrl+Shift+Tab | next / previous tab (also: click a tab, or the wheel over the tabs) |
 | Ctrl+Shift+L | next theme: dark (default), green, gruvbox, red, light (remembered; the right-click menu lists them all) |
 | Ctrl+Shift+wheel | see-through window: opacity 30 .. 100 % in steps of 5 (remembered; also in the menu) |
@@ -203,7 +208,7 @@ from Windows without any SDK.
 
 | System | State |
 |---|---|
-| Windows 10 1809+ / 11 | **tested**: typing, history, Tab, Ctrl-C, resize, scrollback, selection and clipboard, menu, themes, tabs, nvim, large outputs |
+| Windows 10 1809+ / 11 | **tested**: typing, history, Tab, Ctrl-C, resize, scrollback, selection and clipboard, menu, themes, tabs, split panes, find, links, reflow on resize, nvim, large outputs |
 | Linux (X11, or Wayland through XWayland) | **experimental**: compiles and links for x86_64 and aarch64, shares the tested core, but the X11 backend (`tx11.c`) has not been run yet |
 | macOS | **untested**: compiles and links for x86_64 and aarch64; the Cocoa backend (`tcocoa.c`) has never been run |
 
@@ -225,15 +230,55 @@ background and cursor color (nvim reads them to pick its theme, and setting
 them works too), `OSC 4` for a palette color, `OSC 52` to put something in
 the clipboard, and `OSC 7`, with which the shell says where it is, so
 Ctrl+Shift+N opens the new window (and Ctrl+Shift+T the new tab) in the same
-folder.
+folder. `OSC 8` hyperlinks (`ls --hyperlink`, gcc, systemd) show with a
+dotted line and open with Ctrl+click; addresses written as plain text
+(`https://`, `www.`) open the same way. Only `http`, `https`, `ftp` and
+`mailto` links are opened: a program could print a `file://` link to one of
+your programs. `?2026` (synchronized output) holds the picture while a
+program redraws (at most 200 ms), and `DECRQM` tells programs which modes
+are on; `CSI > q` answers the name and version. `?6` (origin mode) counts
+rows inside the scroll region, as vttest and old full screen programs want.
+The kitty keyboard protocol is there (`CSI > 1 u` and friends, a stack of
+flags per screen): with it Esc, Ctrl and Alt keys and Enter/Tab/Backspace
+with a modifier come as `CSI code;mods u`, so a program can tell Ctrl+I
+from Tab. Sixel images (`img2sixel`, `chafa`, `lsix`) are shown on the
+cells they cover and scroll and reflow with the text; the answer to DA1
+says so. On Windows the system's ConPTY drops sixel data before it gets to
+mmc-term: put `conpty.dll` and `OpenConsole.exe` from Windows Terminal next
+to `mmc-term.exe` and mmc-term uses those instead (not tried here).
 
-Not there (yet): re-wrapping text on resize, color emoji, ligatures, search,
-clickable links, moving tabs by dragging.
+When the window gets narrower or wider, the text of the shell and its
+scrollback is wrapped again, like a paragraph; the screen of a full screen
+program (vim, htop) is not, the program redraws it. Accents typed as
+separate marks (`e` + U+0301) and emoji made of several code points (a skin
+tone, `👨‍💻`) stay in one cell, and copying gives them back whole.
+Underlines come in their styles and colors (`4:2` double, `4:3` curly as
+editors use for mistakes, `4:4` dotted, `4:5` dashed, `58` the color), and
+`53` overline and `5` blinking text work too.
+
+A tab can be split into panes, each with a shell of its own (a new one
+starts in the folder of the pane it came from); when its shell ends the
+pane goes and its neighbor takes the room. Only the rows that changed are
+drawn again (typing redraws one line, not the window: about 20 times less
+work), and the picture is the same as a whole one (`ttest` checks it;
+`ttest bench` measures it).
+
+Not there (yet): color emoji (they are drawn in one color), ligatures,
+moving tabs by dragging, the kitty image protocol, drawing on the GPU
+(the software renderer is fast enough and needs nothing from the system).
 
 ## Settings
 
 `/etc/profile` is read once when the shell starts; `~/.mmcrc` is read by every
-interactive shell. Both are bash scripts: `export`, `alias`, `source`, `if`,
+interactive shell (`--rcfile FILE` reads another file instead) and by the
+first shell of a script, so programs it starts get what it sets up. A login
+shell (`mmc -l`, or started as `-mmc`) reads `~/.mmc_profile` (or
+`~/.profile`) and `~/.mmc_logout` when it ends. A script reads `$MMC_ENV`
+(or bash's `$BASH_ENV`) first. `export -f name` passes a function to the
+programs mmc starts, the way bash does (`BASH_FUNC_name%%`), so bash and
+other mmc shells get it, and functions exported by a parent bash come in;
+only a clean function definition is taken from there (nothing after it
+runs, which was bash's Shellshock hole). Both are bash scripts: `export`, `alias`, `source`, `if`,
 functions, `$(command)` ... everything in "What the shell can do" works there.
 
 Example `/etc/profile` for a tools folder on the same drive as mmc
@@ -393,7 +438,14 @@ rule says so, a command's own arguments (git branches ...), Up/Down history,
 match further back, Ctrl-S forward, Enter runs it, Esc keeps the line for
 editing, Ctrl-G drops it), Left/Right, Ctrl-Left/Right by word, Home/End,
 Ctrl-A/E/K/U/W/L, Ctrl-C drops the line (and stops a running loop),
-Ctrl-D leaves. An unfinished command
+Ctrl-D leaves. What Ctrl-K/U/W, Alt-d and Alt-Backspace cut goes into a
+kill ring: Ctrl-Y puts it back, Alt-y right after swaps in the one before.
+Ctrl-_ (or Ctrl-X Ctrl-U) undoes, Ctrl-T swaps two characters, Alt-u/l/c
+make a word UPPER, lower or Capital, Alt-. puts in the last word of the
+line before (again: of the one before that), Alt-< / Alt-> go to the
+first / newest history line, and Ctrl-X Ctrl-E opens the line in
+`$VISUAL` or `$EDITOR` (notepad or vi when unset) and runs what you save.
+A long line goes on over as many rows as it needs. An unfinished command
 (`if` without `fi`, an open quote, a `\` at the end) asks for more with `> `.
 Pasting several lines puts them into the line (shown as a return sign) and
 runs them together when you press Enter. On Windows `.exe .com .cmd .bat` are
@@ -406,8 +458,32 @@ History expansion works in an interactive shell (`set +H` switches it off):
 parts `:h :t :r :e`, `:p` (only show it), `:s/old/new/` (`:gs` for every
 place) and `^old^new` to run the last line again with one word changed.
 
-Not there (yet): `coproc`, stopping a program with Ctrl-Z (Windows has no
-such thing; `fg` waits for a background job), and `fc` beyond `fc -l`.
+`fc` lists (`fc -l`, `-n`, `-r`, first and last as a number, `-n` back or
+the start of a command), edits commands in `-e EDITOR`, `$FCEDIT` or
+`$EDITOR` and runs what you save, and `fc -s old=new cmd` runs one again
+changed. `time` prints in the layout of `$TIMEFORMAT` (`%3lR`, `%U`, `%S`,
+`%P` as in bash; empty prints nothing).
+
+`coproc [NAME] command` runs a command with a pipe to it and one from it:
+`NAME[1]` is the fd to write to, `NAME[0]` the one to read, `NAME_PID` its
+process (`exec {NAME[1]}>&-` closes its input). `<(cmd)` and `>(cmd)` stream:
+the command runs at once, so `while read l; do ...; done < <(tail -f log)`
+works. On Linux and macOS the path is a FIFO any program can open; on
+Windows it is `/dev/fd/N`, which mmc itself reads as a pipe (redirections,
+`source`, `read`, `mapfile`), while a program gets a temporary file with
+what the command wrote (Windows programs cannot open a pipe by a name), so
+there the command has to end first. `/dev/stdin`, `/dev/stdout`,
+`/dev/stderr` and `/dev/fd/N` work in redirections on every system.
+
+Job control: on a Linux or macOS terminal Ctrl-Z stops the program in
+front (`[1]+ Stopped`), `fg` brings it back, `bg` lets it go on behind,
+`jobs` shows it, `suspend` stops the shell itself, and `exit` warns once
+about stopped jobs. Every job has a process group of its own, so Ctrl-C
+and Ctrl-Z reach only the one in front. Windows has no Ctrl-Z for a
+console (the key goes to the program as a key), but `kill -STOP %1` and
+`kill -CONT %1` stop and resume a job there, and `fg` and `bg` work with
+it. A pipeline whose reader stops early (`yes | head -1`) ends at once on
+Windows too, as SIGPIPE does elsewhere.
 `ulimit` reports what mmc has and says so when it cannot change a limit.
 These `shopt` options are accepted but do nothing: `cdspell`, `dirspell`,
 `execfail`, `extdebug`, `inherit_errexit`, `localvar_inherit`,

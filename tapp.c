@@ -16,20 +16,40 @@
 
 enum { M_COPY = 1, M_PASTE, M_SELECT_ALL, M_BIGGER, M_SMALLER,
        M_MORE_CLEAR, M_LESS_CLEAR, M_NEW_TAB, M_RENAME_TAB, M_CLOSE_TAB,
-       M_NEW_WINDOW, M_ABOUT, M_THEME /* + theme number, keep last */ };
+       M_NEW_WINDOW, M_ABOUT, M_FIND, M_SPLIT_RIGHT, M_SPLIT_DOWN, M_CLOSE_PANE,
+       M_THEME /* + theme number, keep last */ };
 
-/* one shell with its own screen; the window shows one tab at a time */
-typedef struct Tab {
+/* one shell with its own screen: a tab has one, or several side by side */
+typedef struct Pane {
   Grid *g;
   Vt vt;
   Pty *pty;	/* NULL until started */
   Theme theme;	/* the window's, plus what the program changed (OSC 4, 10 ..) */
-  char label[64];	/* the name the user gave it, "" = none: wins over title */
   char title[256];	/* what the program set, "" = none */
   char name[64];	/* the program: the tab says this without a title */
   char cwd[512];	/* what the shell reported with OSC 7 */
   int hold;	/* --hold: stays open when the program ends */
-  int done, news;	/* the program ended; output came while hidden */
+  int done;	/* the program ended */
+  struct Tab *tab;
+  int x, y, cols, rows;	/* its place in the tab, in cells */
+} Pane;
+
+/* how a tab is divided: one pane, or two parts side by side (vertical)
+** or one above the other; permille is the first part's share */
+typedef struct Split {
+  Pane *pane;
+  int vertical, permille;
+  struct Split *a, *b, *up;
+} Split;
+
+/* what the tab bar shows: the window shows one tab at a time */
+typedef struct Tab {
+  Split *root;
+  Pane *panes[PANE_MAX];
+  int npanes;
+  Pane *focus;	/* the pane that gets the keys */
+  char label[64];	/* the name the user gave it, "" = none: wins over title */
+  int news;	/* output came while it was hidden */
 } Tab;
 
 static struct {
@@ -39,6 +59,7 @@ static struct {
   char *exe, *exe_dir, *root, *conf;
   Tab *tabs[TAB_MAX];
   int ntabs, cur;
+  int cols, rows;	/* the terminal part of the window, in cells (all panes) */
   Grid *g;	/* the grid of the tab on screen */
   Frame frame;
   Scene scene;
@@ -58,6 +79,8 @@ static struct {
   int win_w, win_h;
   int dirty, focused, fullscreen, resizing;
   int blink_on;
+  int tblink;	/* blinking text is shown (it blinks only while some is on screen) */
+  unsigned tblink_at;
   unsigned now, blink_at, bar_until, pill_until;
   unsigned quiet_until;	/* hidden tabs redraw after a resize: not news */
   char pill[32];
@@ -71,15 +94,36 @@ static struct {
   int mouse_held;	/* the button a program is being told about (0: none) */
   int mouse_cx, mouse_cy;	/* the cell the last report named */
   int exit_code;	/* of the program that ended last */
+  /* find: the text, the places it is (x0 y0 x1 y1 each), the one shown */
+  int finding;
+  char find[128];
+  char find_box[200];
+  int *fm, fcount, fcap, fcur;
+  /* the link under the mouse, cells as in grid_line() */
+  int has_hot, hx0, hy0, hx1, hy1;
+  char hot_url[2048];
+  unsigned sync_since;	/* the program asked to hold the screen (2026) */
+  uint32_t look;	/* everything on screen but the rows, last time: see look_of */
+  struct Split *div_drag;	/* the line between two panes being dragged */
+  int frame_ok;	/* the frame holds a whole drawing: rows can be redrawn alone */
 } A;
 
 #define CUR	(A.tabs[A.cur])
+#define CP	(CUR->focus)	/* the pane with the focus */
 
 /* where the terminal starts: below the title bar, the tabs and the strip */
 #define TOP	(A.head + A.bar + A.strip)
 
 
 static void build_scene (void);
+static void layout_tab (Tab *t);
+static void split_pane (int vertical);
+static void close_pane (Pane *p);
+static void focus_toward (int dx, int dy);
+static void focus_report (int on);
+static Pane *pane_at (int x, int y);
+static void focus_pane (Pane *p);
+static int div_mouse (int type, int button, int x, int y);
 static void apply_bar (void);
 static void new_tab (void);
 static void close_tab (int i);
@@ -88,6 +132,9 @@ static const char *window_title (void);
 static void rename_start (void);
 static void rename_end (int keep);
 static void rename_add (const char *utf8);
+static void find_open (void);
+static void find_key (int key, int mods, uint32_t cp);
+static void find_add (const char *utf8);
 
 
 static void touch (void) {
@@ -117,7 +164,13 @@ static int bar_height (void) {
 
 static void apply_font (void) {
   float px = (float)(A.cfg.font_size + A.zoom) * A.scale * 96.0f / 72.0f;
+  int i, k;
   font_set_px(px);
+  for (i = 0; i < A.ntabs; i++)	/* images are placed by the cell size */
+    for (k = 0; k < A.tabs[i]->npanes; k++) {
+      A.tabs[i]->panes[k]->g->cell_w = font_cell_w();
+      A.tabs[i]->panes[k]->g->cell_h = font_cell_h();
+    }
   A.bar = bar_height();
   A.pad = (int)((float)A.cfg.padding * A.scale + 0.5f);
   A.strip = (int)(2.0f * A.scale + 0.5f);	/* the thin blue to green line */
@@ -157,14 +210,15 @@ void app_on_resize (int w, int h) {
   A.win_w = w;
   A.win_h = h;
   frame_resize(&A.frame, w, h);
-  if (A.g != NULL && (cols != A.g->cols || rows != A.g->rows)) {
+  A.frame_ok = 0;
+  if (A.g != NULL && (cols != A.cols || rows != A.rows)) {
     int i;
-    for (i = 0; i < A.ntabs; i++) {	/* hidden tabs too: all have one size */
-      grid_resize(A.tabs[i]->g, cols, rows);
-      if (A.tabs[i]->pty != NULL) pty_resize(A.tabs[i]->pty, cols, rows);
-    }
+    A.cols = cols;
+    A.rows = rows;
+    for (i = 0; i < A.ntabs; i++) layout_tab(A.tabs[i]);	/* hidden tabs too */
     A.quiet_until = A.now + 1000;
-    A.has_sel = 0;
+    A.has_sel = A.has_hot = 0;
+    A.fcur = -1;
     if (A.resizing) {
       sprintf(A.pill, "%d x %d", cols, rows);
       A.pill_until = A.now + 900;
@@ -188,7 +242,7 @@ static void refit_window (void) {
     app_on_resize(A.win_w, A.win_h);
     return;
   }
-  size_for(A.g->cols, A.g->rows, &w, &h);
+  size_for(A.cols, A.rows, &w, &h);
   win_set_size(w, h);
 }
 
@@ -246,8 +300,11 @@ static void set_theme (const char *name, int save) {
   strncpy(A.cfg.theme, name, sizeof(A.cfg.theme) - 1);
   theme_apply(&A.theme, theme_find(name), &A.cfg);
   for (i = 0; i < A.ntabs; i++) {
-    A.tabs[i]->theme = A.theme;
-    A.tabs[i]->g->all_dirty = 1;
+    int k;
+    for (k = 0; k < A.tabs[i]->npanes; k++) {
+      A.tabs[i]->panes[k]->theme = A.theme;
+      A.tabs[i]->panes[k]->g->all_dirty = 1;
+    }
   }
   /* a quiet frame: the header color with only a hint of the logo blue */
   win_set_chrome(A.theme.bg, blend(A.theme.ui, A.theme.accent1, A.theme.dark ? 70 : 110),
@@ -293,7 +350,7 @@ static void select_all (void) {
 
 
 static void send (const char *s, size_t n) {
-  if (CUR->pty != NULL) pty_write(CUR->pty, s, n);
+  if (CP->pty != NULL) pty_write(CP->pty, s, n);
   if (A.g->view != 0) grid_set_view(A.g, 0);	/* typing shows the live screen */
   A.blink_on = 1;
   A.blink_at = A.now;
@@ -314,6 +371,10 @@ void app_on_paste (const char *utf8) {
     rename_add(utf8);
     return;
   }
+  if (A.finding) {
+    find_add(utf8);
+    return;
+  }
   buf_init(&b);
   if (A.g->bracketed) buf_puts(&b, "\033[200~");
   for (p = utf8; *p; p++) {
@@ -332,9 +393,9 @@ void app_on_paste (const char *utf8) {
 ** starts next starts there; returns the folder to come back to, or NULL */
 static char *enter_cwd (void) {
   char *back;
-  if (CUR->cwd[0] == '\0') return NULL;
+  if (CP->cwd[0] == '\0') return NULL;
   back = os_getcwd();
-  if (os_chdir(CUR->cwd) != 0) {
+  if (os_chdir(CP->cwd) != 0) {
     free(back);
     return NULL;
   }
@@ -414,10 +475,14 @@ static void menu_open (int x, int y) {
   menu_add("Copy", "Ctrl+Shift+C", M_COPY);
   menu_add("Paste", "Ctrl+Shift+V", M_PASTE);
   menu_add("Select all", NULL, M_SELECT_ALL);
+  menu_add("Find", "Ctrl+Shift+F", M_FIND);
   menu_add(NULL, NULL, 0);
   menu_add("New tab", "Ctrl+Shift+T", M_NEW_TAB);
   menu_add("Rename tab", "double click", M_RENAME_TAB);
-  menu_add("Close tab", "Ctrl+Shift+W", M_CLOSE_TAB);
+  menu_add("Split right", "Ctrl+Shift+D", M_SPLIT_RIGHT);
+  menu_add("Split down", "Ctrl+Shift+E", M_SPLIT_DOWN);
+  if (CUR->npanes > 1) menu_add("Close pane", "Ctrl+Shift+W", M_CLOSE_PANE);
+  menu_add("Close tab", CUR->npanes > 1 ? NULL : "Ctrl+Shift+W", M_CLOSE_TAB);
   menu_add("New window", "Ctrl+Shift+N", M_NEW_WINDOW);
   menu_add(NULL, NULL, 0);
   for (i = 0; i < 8 && (t = theme_at(i)) != NULL; i++) {	/* the current one ticked */
@@ -477,6 +542,10 @@ static void menu_do (int id) {
     case M_CLOSE_TAB: close_tab(A.cur); break;
     case M_NEW_WINDOW: new_window(); break;
     case M_ABOUT: about(); break;
+    case M_FIND: find_open(); break;
+    case M_SPLIT_RIGHT: split_pane(1); break;
+    case M_SPLIT_DOWN: split_pane(0); break;
+    case M_CLOSE_PANE: close_pane(CP); break;
     default:
       if (id >= M_THEME && theme_at(id - M_THEME) != NULL)
         set_theme(theme_at(id - M_THEME)->name, 1);
@@ -499,7 +568,7 @@ static void rename_start (void) {
   A.menu.open = 0;
   A.renaming = 1;
   A.edit[0] = '\0';	/* start from what the tab says now */
-  rename_add(t->label[0] ? t->label : t->title[0] ? t->title : t->name);
+  rename_add(t->label[0] ? t->label : t->focus->title[0] ? t->focus->title : t->focus->name);
   touch();
 }
 
@@ -591,14 +660,26 @@ static int shortcut (int key, int mods, uint32_t cp) {
     else if (cs && cp == 'V') win_request_paste();
     else if (cs && cp == 'N') new_window();
     else if (cs && cp == 'T') new_tab();
-    else if (cs && cp == 'W') close_tab(A.cur);
+    else if (cs && cp == 'W') {	/* the pane, or the tab when it is its only one */
+      if (CUR->npanes > 1) close_pane(CP);
+      else close_tab(A.cur);
+    }
+    else if (cs && cp == 'D') split_pane(1);	/* side by side */
+    else if (cs && cp == 'E') split_pane(0);	/* one above the other */
     else if (cs && cp == 'L') next_theme();
     else if (cs && cp == 'A') select_all();
+    else if (cs && cp == 'F') find_open();
     else if ((mods & TM_CTRL) && (cp == '=' || cp == '+')) zoom(1);
     else if ((mods & TM_CTRL) && cp == '-') zoom(-1);
     else if ((mods & TM_CTRL) && cp == '0') zoom(0);
     else if ((mods & TM_CTRL) && cp == ' ') send("\0", 1);
     else return 0;
+    return 1;
+  }
+  if (CUR->npanes > 1 && (mods & TM_ALT) && !(mods & (TM_CTRL | TM_SHIFT)) &&
+      (key == TK_LEFT || key == TK_RIGHT || key == TK_UP || key == TK_DOWN)) {
+    focus_toward(key == TK_LEFT ? -1 : key == TK_RIGHT ? 1 : 0,
+                 key == TK_UP ? -1 : key == TK_DOWN ? 1 : 0);	/* Alt+arrow: the next pane */
     return 1;
   }
   if (key == TK_INSERT && (mods & TM_CTRL)) copy_selection();
@@ -619,6 +700,36 @@ static int shortcut (int key, int mods, uint32_t cp) {
 }
 
 
+/* CSI code ; mods u: a key the way the kitty keyboard protocol says it */
+static void send_kitty (uint32_t code, int mods) {
+  char buf[48];
+  int m = 1 + ((mods & TM_SHIFT) ? 1 : 0) + ((mods & TM_ALT) ? 2 : 0) + ((mods & TM_CTRL) ? 4 : 0);
+  if (m > 1) sprintf(buf, "\033[%lu;%du", (unsigned long)code, m);
+  else sprintf(buf, "\033[%luu", (unsigned long)code);
+  send_str(buf);
+}
+
+
+/* a key the kitty protocol says differently (flag 1: what legacy mixes up;
+** flag 8: every key); returns 1 when sent */
+static int kitty_key (int key, int mods, uint32_t cp) {
+  int k = grid_kitty(A.g);
+  uint32_t code = 0;
+  if (k == 0) return 0;
+  if (key == TK_ESCAPE) code = 27;
+  else if (key == TK_ENTER || key == TK_TAB || key == TK_BACKSPACE) {
+    if (!(k & 8) && !(mods & (TM_CTRL | TM_ALT | TM_SHIFT))) return 0;
+    code = key == TK_ENTER ? 13 : key == TK_TAB ? 9 : 127;
+  }
+  else if (key == TK_CHAR && (mods & (TM_CTRL | TM_ALT))) {
+    code = (cp >= 'A' && cp <= 'Z') ? cp + 32 : cp;	/* the key, not the shifted letter */
+  }
+  if (code == 0) return 0;
+  send_kitty(code, mods);
+  return 1;
+}
+
+
 int app_on_key (int key, int mods, uint32_t cp) {
   static const int fn_number[] = {11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 23, 24};
   if (A.menu.open) {
@@ -630,7 +741,12 @@ int app_on_key (int key, int mods, uint32_t cp) {
     rename_key(key, mods, cp);
     return 1;
   }
+  if (A.finding) {	/* and here to the search */
+    find_key(key, mods, cp);
+    return 1;
+  }
   if (shortcut(key, mods, cp)) return 1;
+  if (kitty_key(key, mods, cp)) return 1;
   switch (key) {
     case TK_UP: send_csi(mods, 0, 'A'); break;
     case TK_DOWN: send_csi(mods, 0, 'B'); break;
@@ -666,6 +782,28 @@ void app_on_text (const char *utf8, int mods) {
   if (A.menu.open) A.menu.open = 0;
   if (A.renaming) {
     if (!(mods & TM_ALT)) rename_add(utf8);
+    return;
+  }
+  if (A.finding) {
+    if (!(mods & TM_ALT)) find_add(utf8);
+    return;
+  }
+  if (grid_kitty(A.g) & 8 || ((grid_kitty(A.g) & 1) && (mods & TM_ALT))) {
+    const char *p = utf8;	/* every character as a key of its own */
+    while (*p) {
+      const unsigned char *u = (const unsigned char *)p;
+      uint32_t c = *u;
+      int extra = (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC0) ? 1 : 0, j;
+      if (extra) c &= (0x3Fu >> extra);
+      for (j = 1; j <= extra && (u[j] & 0xC0) == 0x80; j++) c = (c << 6) | (u[j] & 0x3F);
+      p += j;
+      if (c < 0x20 && c != 0x1B) {	/* Ctrl+letter that came as text */
+        send_kitty(c + 96, (mods & TM_ALT) | TM_CTRL);
+        continue;
+      }
+      if (c >= 'A' && c <= 'Z') send_kitty(c + 32, (mods & TM_ALT) | TM_SHIFT);
+      else send_kitty(c, mods & TM_ALT);
+    }
     return;
   }
   if (mods & TM_ALT) send_str("\033");
@@ -794,9 +932,9 @@ static int tabbar_mouse (int type, int button, int x, int y) {
 */
 
 static void cell_at (int x, int y, int *cx, int *cy) {
-  int col = (x - A.pad) / font_cell_w();
-  int row = (y - TOP - A.pad) / font_cell_h();
-  if (x < A.pad) col = 0;
+  int col = (x - A.pad) / font_cell_w() - CP->x;
+  int row = (y - TOP - A.pad) / font_cell_h() - CP->y;
+  if (x < A.pad || col < 0) col = 0;
   if (col >= A.g->cols) col = A.g->cols - 1;
   if (row < 0) row = 0;
   if (row >= A.g->rows) row = A.g->rows - 1;
@@ -892,6 +1030,345 @@ static int mouse_send (int type, int button, int x, int y, int mods, int arg) {
 /* }================================================================== */
 
 
+/*
+** {==================================================================
+** Find in the screen and the scrollback (Ctrl+Shift+F), and the links
+** under the mouse (OSC 8 ones, and addresses in the text)
+** ===================================================================
+*/
+
+/* a logical line: the rows the terminal wrapped, as code points with their cells */
+typedef struct Run {
+  uint32_t *cp;
+  int *x, *y;
+  int n, cap;
+} Run;
+
+
+static void run_add (Run *r, uint32_t cp, int x, int y) {
+  if (r->n == r->cap) {
+    r->cap = r->cap ? r->cap * 2 : 256;
+    r->cp = (uint32_t *)xrealloc(r->cp, (size_t)r->cap * sizeof(uint32_t));
+    r->x = (int *)xrealloc(r->x, (size_t)r->cap * sizeof(int));
+    r->y = (int *)xrealloc(r->y, (size_t)r->cap * sizeof(int));
+  }
+  r->cp[r->n] = cp;
+  r->x[r->n] = x;
+  r->y[r->n] = y;
+  r->n++;
+}
+
+
+static void run_free (Run *r) {
+  free(r->cp);
+  free(r->x);
+  free(r->y);
+  memset(r, 0, sizeof(*r));
+}
+
+
+/* the first row of the logical line that has row y */
+static int run_start (const Grid *g, int y) {
+  while (y > -g->sb_len) {
+    const Line *up = grid_line(g, y - 1);
+    if (up == NULL || !up->wrapped) break;
+    y--;
+  }
+  return y;
+}
+
+
+/* fills r with the logical line starting at row y; returns the row after it */
+static int run_build (Run *r, const Grid *g, int y) {
+  r->n = 0;
+  for (; y < g->rows; y++) {
+    const Line *l = grid_line(g, y);
+    int x, last;
+    if (l == NULL) break;
+    for (last = l->n - 1; !l->wrapped && last >= 0 && l->c[last].ch == 0; last--)
+      ;	/* no blanks after the text */
+    for (x = 0; x <= last; x++) {
+      if (l->c[x].attr & A_WCONT) continue;
+      run_add(r, l->c[x].ch ? grid_base(g, &l->c[x]) : ' ', x, y);
+    }
+    if (!l->wrapped) return y + 1;
+  }
+  return y;
+}
+
+
+static uint32_t fold (uint32_t c) {
+  return (c >= 'A' && c <= 'Z') ? c + 32 : c;
+}
+
+
+/* every place the search text is, oldest first */
+static void find_all (void) {
+  uint32_t q[128];
+  int nq = 0, y;
+  const char *p = A.find;
+  Run r;
+  memset(&r, 0, sizeof(r));
+  A.fcount = 0;
+  while (*p && nq < 128) {	/* the search text as code points */
+    const unsigned char *u = (const unsigned char *)p;
+    uint32_t c = *u;
+    int extra = (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC0) ? 1 : 0, k;
+    if (extra) c &= (0x3Fu >> extra);
+    for (k = 1; k <= extra && (u[k] & 0xC0) == 0x80; k++) c = (c << 6) | (u[k] & 0x3F);
+    p += k;
+    q[nq++] = fold(c);
+  }
+  if (nq == 0) return;
+  for (y = -A.g->sb_len; y < A.g->rows;) {
+    int i, next = run_build(&r, A.g, y);
+    for (i = 0; i + nq <= r.n; i++) {
+      int k;
+      for (k = 0; k < nq && fold(r.cp[i + k]) == q[k]; k++)
+        ;
+      if (k < nq) continue;
+      if (A.fcount == A.fcap) {
+        A.fcap = A.fcap ? A.fcap * 2 : 64;
+        A.fm = (int *)xrealloc(A.fm, (size_t)A.fcap * 4 * sizeof(int));
+      }
+      A.fm[A.fcount * 4] = r.x[i];
+      A.fm[A.fcount * 4 + 1] = r.y[i];
+      A.fm[A.fcount * 4 + 2] = r.x[i + nq - 1];
+      A.fm[A.fcount * 4 + 3] = r.y[i + nq - 1];
+      A.fcount++;
+      i += nq - 1;
+    }
+    y = next > y ? next : y + 1;
+  }
+  run_free(&r);
+}
+
+
+/* shows match i: selected, and scrolled to if it is not on screen */
+static void find_show (int i) {
+  int y, view;
+  A.fcur = i;
+  if (i < 0 || i >= A.fcount) {
+    A.has_sel = 0;
+    return;
+  }
+  A.ax = A.fm[i * 4];
+  A.ay = A.fm[i * 4 + 1];
+  A.bx = A.fm[i * 4 + 2];
+  A.by = A.fm[i * 4 + 3];
+  A.has_sel = 1;
+  A.sel_mode = 0;
+  y = A.ay;
+  if (y + A.g->view < 0 || A.by + A.g->view >= A.g->rows) {	/* off screen */
+    view = A.g->rows / 2 - y;
+    if (view < 0) view = 0;
+    grid_set_view(A.g, view);
+  }
+}
+
+
+/* the search text changed: stay on the match shown, or the next one up */
+static void find_update (void) {
+  int ox = A.has_sel ? A.ax : A.g->cols, oy = A.has_sel ? A.ay : A.g->rows, i, pick = -1;
+  find_all();
+  for (i = A.fcount - 1; i >= 0; i--) {
+    int x = A.fm[i * 4], y = A.fm[i * 4 + 1];
+    if (y < oy || (y == oy && x <= ox)) {
+      pick = i;
+      break;
+    }
+  }
+  if (pick < 0 && A.fcount > 0) pick = A.fcount - 1;
+  find_show(pick);
+  touch();
+}
+
+
+static void find_open (void) {
+  if (A.finding) {	/* again: the next match up */
+    if (A.fcount > 0) find_show((A.fcur + A.fcount - 1) % A.fcount);
+    touch();
+    return;
+  }
+  A.menu.open = 0;
+  rename_end(1);
+  A.finding = 1;
+  A.find[0] = '\0';
+  A.fcount = 0;
+  A.fcur = -1;
+  touch();
+}
+
+
+static void find_close (void) {
+  A.finding = 0;
+  A.has_sel = 0;
+  touch();
+}
+
+
+static void find_add (const char *utf8) {
+  size_t have = strlen(A.find);
+  for (; *utf8 != '\0'; utf8++) {
+    unsigned char c = (unsigned char)*utf8;
+    size_t n = (c >= 0xF0) ? 4 : (c >= 0xE0) ? 3 : (c >= 0xC0) ? 2 : 1;
+    if (c < 0x20 || c == 0x7F) continue;
+    if (have + n >= sizeof(A.find)) break;
+    memcpy(A.find + have, utf8, n);
+    have += n;
+    utf8 += n - 1;
+  }
+  A.find[have] = '\0';
+  find_update();
+}
+
+
+/* Enter or Up: the next match up (older); Shift+Enter or Down: down */
+static void find_key (int key, int mods, uint32_t cp) {
+  int cs = (mods & TM_CTRL) && (mods & TM_SHIFT);
+  if (key == TK_ESCAPE) find_close();
+  else if (key == TK_CHAR && cs && (cp == 'F' || cp == 'f')) find_open();
+  else if (key == TK_CHAR && (mods & TM_CTRL) && (cp == 'V' || cp == 'v')) win_request_paste();
+  else if ((key == TK_ENTER && !(mods & TM_SHIFT)) || key == TK_UP) {
+    find_all();	/* new output moves things: count again */
+    if (A.fcount > 0) find_show(A.fcur < 0 ? A.fcount - 1 : (A.fcur + A.fcount - 1) % A.fcount);
+    touch();
+  }
+  else if (key == TK_ENTER || key == TK_DOWN) {
+    find_all();
+    if (A.fcount > 0) find_show((A.fcur + 1) % A.fcount);
+    touch();
+  }
+  else if (key == TK_BACKSPACE) {
+    size_t n = strlen(A.find);
+    while (n > 0 && ((unsigned char)A.find[n - 1] & 0xC0) == 0x80) n--;
+    if (n > 0) n--;
+    if (mods & TM_CTRL) n = 0;
+    A.find[n] = '\0';
+    find_update();
+  }
+}
+
+
+/*
+** Only web and mail addresses are opened. A program can print any link,
+** and a file:// one or a bare path could start a program on this machine.
+*/
+static int url_safe (const char *u) {
+  static const char *const ok[] = {"https://", "http://", "ftp://", "mailto:", NULL};
+  const char *p;
+  int i;
+  for (p = u; *p; p++)
+    if ((unsigned char)*p < 0x20 || *p == 0x7F) return 0;
+  for (i = 0; ok[i] != NULL; i++) {
+    size_t n = strlen(ok[i]), k;
+    for (k = 0; k < n && tolower((unsigned char)u[k]) == ok[i][k]; k++)
+      ;
+    if (k == n && u[n] != '\0') return 1;
+  }
+  return 0;
+}
+
+
+/* is c part of a web address? */
+static int url_char (uint32_t c) {
+  return c < 128 && (isalnum((int)c) || strchr("-._~:/?#[]@!$&'()*+,;=%", (int)c) != NULL);
+}
+
+
+/*
+** The link under cell (cx, cy), y as in grid_line(): an OSC 8 one, or an
+** address written in the text. Sets A.hot_*; returns 1 when there is one.
+*/
+static int link_at (int cx, int cy) {
+  const Line *l = grid_line(A.g, cy);
+  Run r;
+  int i, at = -1, found = 0;
+  static const char *const schemes[] = {"https://", "http://", "ftp://", "mailto:", "www.", NULL};
+  A.has_hot = 0;
+  if (l == NULL || cx < 0 || cx >= l->n) return 0;
+  memset(&r, 0, sizeof(r));
+  run_build(&r, A.g, run_start(A.g, cy));
+  for (i = 0; i < r.n; i++)
+    if (r.y[i] == cy && r.x[i] <= cx) at = i;	/* the character under the mouse */
+  if (at >= 0 && (l->c[cx].attr & A_WCONT) == 0 && r.x[at] != cx) at = -1;
+  if (at >= 0 && l->c[r.x[at]].link != 0) {	/* OSC 8: the cells with the same link */
+    int id = l->c[r.x[at]].link, a = at, b = at;
+    const char *uri = grid_link(A.g, id);
+    while (a > 0 && grid_line(A.g, r.y[a - 1])->c[r.x[a - 1]].link == id) a--;
+    while (b + 1 < r.n && grid_line(A.g, r.y[b + 1])->c[r.x[b + 1]].link == id) b++;
+    if (uri != NULL) {
+      strncpy(A.hot_url, uri, sizeof(A.hot_url) - 1);
+      A.hot_url[sizeof(A.hot_url) - 1] = '\0';
+      A.hx0 = r.x[a];
+      A.hy0 = r.y[a];
+      A.hx1 = r.x[b];
+      A.hy1 = r.y[b];
+      found = 1;
+    }
+  }
+  else if (at >= 0 && url_char(r.cp[at])) {	/* an address in the text? */
+    int a = at, b = at, k, s;
+    char text[2048];
+    while (a > 0 && url_char(r.cp[a - 1])) a--;
+    while (b + 1 < r.n && url_char(r.cp[b + 1])) b++;
+    for (s = a; s <= at && !found; s++) {	/* where does an address start? */
+      size_t n = 0, j;
+      for (k = 0; schemes[k] != NULL; k++) {
+        n = strlen(schemes[k]);
+        if ((size_t)(b - s + 1) <= n) continue;
+        for (j = 0; j < n && fold(r.cp[s + (int)j]) == (uint32_t)schemes[k][j]; j++)
+          ;
+        if (j == n) break;
+      }
+      if (schemes[k] == NULL) continue;
+      {	/* its end: no dot, comma or bracket that closes nothing */
+        int e = b, open = 0, m;
+        for (m = s; m <= e; m++) open += (r.cp[m] == '(') - (r.cp[m] == ')');
+        while (e > s && (strchr(".,;:!?'\"", (int)r.cp[e]) != NULL ||
+                         (r.cp[e] == ')' && open < 0))) {
+          if (r.cp[e] == ')') open++;
+          e--;
+        }
+        if (at > e || e - s + 1 >= (int)sizeof(text) - 16) break;
+        n = 0;
+        if (schemes[k][0] == 'w') {
+          strcpy(text, "https://");
+          n = 8;
+        }
+        for (m = s; m <= e; m++) text[n++] = (char)r.cp[m];
+        text[n] = '\0';
+        strcpy(A.hot_url, text);
+        A.hx0 = r.x[s];
+        A.hy0 = r.y[s];
+        A.hx1 = r.x[e];
+        A.hy1 = r.y[e];
+        found = 1;
+      }
+    }
+  }
+  run_free(&r);
+  A.has_hot = found;
+  return found;
+}
+
+
+/* the mouse moved over the terminal: underline the link it is on */
+static void hover (int x, int y) {
+  int cx, cy, had = A.has_hot, ox0 = A.hx0, oy0 = A.hy0;
+  if (x < A.pad || y < TOP) {
+    A.has_hot = 0;
+  }
+  else {
+    cell_at(x, y, &cx, &cy);
+    link_at(cx, cy);
+  }
+  if (had != A.has_hot || (A.has_hot && (ox0 != A.hx0 || oy0 != A.hy0))) touch();
+}
+
+/* }================================================================== */
+
+
 /* grows the selection to whole words or whole lines */
 static void sel_extend (void) {
   int swap = (A.by < A.ay) || (A.by == A.ay && A.bx < A.ax);
@@ -971,6 +1448,27 @@ void app_on_mouse (int type, int button, int x, int y, int mods, int arg) {
     return;
   }
   if (tabbar_mouse(type, button, x, y)) return;
+  if (type == TMS_DOWN && button == 1 && (mods & TM_CTRL) && y >= TOP) {
+    hover(x, y);
+    if (A.has_hot) {	/* Ctrl+click on a link opens it */
+      if (url_safe(A.hot_url)) win_open_url(A.hot_url);
+      return;
+    }
+  }
+  if (div_mouse(type, button, x, y)) return;	/* dragging the line between panes */
+  if (type == TMS_DOWN && CUR->npanes > 1 && y >= TOP) {	/* a click picks the pane */
+    Pane *p = pane_at(x, y);
+    if (p != NULL && p != CP) focus_pane(p);
+  }
+  if (type == TMS_MOVE && !A.selecting && !A.bar_drag) {
+    if (CUR->npanes > 1 && pane_at(x, y) != CP) {
+      if (A.has_hot) {
+        A.has_hot = 0;
+        touch();
+      }
+    }
+    else hover(x, y);
+  }
   if (mouse_to_program(mods) && mouse_send(type, button, x, y, mods, arg)) return;
   cell_at(x, y, &cx, &cy);
   if (type == TMS_DOWN && button == 1) {
@@ -1039,20 +1537,20 @@ void app_on_mouse (int type, int button, int x, int y, int mods, int arg) {
 */
 
 static const char *window_title (void) {
-  return CUR->label[0] ? CUR->label : CUR->title[0] ? CUR->title : TERM_NAME;
+  return CUR->label[0] ? CUR->label : CP->title[0] ? CP->title : TERM_NAME;
 }
 
 
 static void on_reply (void *ud, const char *s, size_t n) {
-  Tab *t = (Tab *)ud;
+  Pane *t = (Pane *)ud;
   if (t->pty != NULL) pty_write(t->pty, s, n);
 }
 
 
 static void on_title (void *ud, const char *utf8) {
-  Tab *t = (Tab *)ud;
+  Pane *t = (Pane *)ud;
   strncpy(t->title, utf8, sizeof(t->title) - 1);
-  if (t == CUR) win_set_title(window_title());
+  if (t == CP) win_set_title(window_title());
   touch();
 }
 
@@ -1099,7 +1597,7 @@ static int osc_color (const char *v, uint32_t *out) {
 }
 
 
-static void osc_reply_color (Tab *t, int code, int index, uint32_t rgb) {
+static void osc_reply_color (Pane *t, int code, int index, uint32_t rgb) {
   char buf[96];
   unsigned r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
   if (code == 4)
@@ -1135,7 +1633,7 @@ static size_t osc_unbase64 (const char *s, char *out, size_t max) {
 
 
 /* "file://host/d/w/mmc" or a plain path -> the folder a new window opens in */
-static void osc_set_cwd (Tab *t, const char *text) {
+static void osc_set_cwd (Pane *t, const char *text) {
   char *cwd = t->cwd;
   const char *p = text;
   char *w;
@@ -1173,7 +1671,7 @@ static void osc_set_cwd (Tab *t, const char *text) {
 
 
 static void on_osc (void *ud, int code, const char *text) {
-  Tab *t = (Tab *)ud;
+  Pane *t = (Pane *)ud;
   uint32_t rgb;
   if (code == 7) {
     osc_set_cwd(t, text);
@@ -1231,17 +1729,18 @@ static void on_osc (void *ud, int code, const char *text) {
 
 /* tells the program of the tab on screen that it got or lost the focus */
 static void focus_report (int on) {
-  if (A.g != NULL && A.g->focus_events && !CUR->done && CUR->pty != NULL)
-    pty_write(CUR->pty, on ? "\033[I" : "\033[O", 3);
+  if (A.g != NULL && A.g->focus_events && !CP->done && CP->pty != NULL)
+    pty_write(CP->pty, on ? "\033[I" : "\033[O", 3);
 }
 
 
-/* after CUR changed: the window shows that tab from now on */
+/* after CUR or its focus changed: the window shows and types into that pane */
 static void show_tab (void) {
-  A.g = CUR->g;
+  A.g = CP->g;
   A.g->all_dirty = 1;
   CUR->news = 0;
   A.has_sel = A.selecting = A.bar_drag = A.mouse_held = 0;
+  A.has_hot = A.finding = 0;
   A.hot_tab = -1;
   A.pressed_close = -1;
   win_set_title(window_title());
@@ -1259,12 +1758,329 @@ static void switch_tab (int i) {
 }
 
 
+static void pane_free (Pane *p) {
+  if (p->pty != NULL) pty_close(p->pty);
+  vt_free(&p->vt);
+  grid_free(p->g);
+  free(p);
+}
+
+
+static void split_free (Split *s) {
+  if (s == NULL) return;
+  split_free(s->a);
+  split_free(s->b);
+  free(s);
+}
+
+
 static void tab_free (Tab *t) {
-  if (t->pty != NULL) pty_close(t->pty);
-  vt_free(&t->vt);
-  grid_free(t->g);
+  int i;
+  for (i = 0; i < t->npanes; i++) pane_free(t->panes[i]);
+  if (A.div_drag != NULL && t == CUR) A.div_drag = NULL;
+  split_free(t->root);
   free(t);
 }
+
+
+/*
+** {==================================================================
+** Panes: a tab split side by side or one above the other, each part
+** with a shell of its own. The parts are a tree; between two parts is
+** a gap of one cell with a line in it.
+** ===================================================================
+*/
+
+/* gives every pane under s its place, in cells */
+static void layout_split (Split *s, int x, int y, int cols, int rows) {
+  int a;
+  if (s->pane != NULL) {
+    s->pane->x = x;
+    s->pane->y = y;
+    s->pane->cols = cols < 2 ? 2 : cols;
+    s->pane->rows = rows < 1 ? 1 : rows;
+    return;
+  }
+  if (s->vertical) {
+    a = (int)((long)(cols - 1) * s->permille / 1000);
+    if (a < 2) a = 2;
+    if (cols - 1 - a < 2) a = cols - 3;
+    layout_split(s->a, x, y, a, rows);
+    layout_split(s->b, x + a + 1, y, cols - a - 1, rows);
+  }
+  else {
+    a = (int)((long)(rows - 1) * s->permille / 1000);
+    if (a < 1) a = 1;
+    if (rows - 1 - a < 1) a = rows - 2;
+    layout_split(s->a, x, y, cols, a);
+    layout_split(s->b, x, y + a + 1, cols, rows - a - 1);
+  }
+}
+
+
+/* the panes of t get their places, their grids and programs the size */
+static void layout_tab (Tab *t) {
+  int i;
+  layout_split(t->root, 0, 0, A.cols, A.rows);
+  for (i = 0; i < t->npanes; i++) {
+    Pane *p = t->panes[i];
+    if (p->g->cols == p->cols && p->g->rows == p->rows) continue;
+    grid_resize(p->g, p->cols, p->rows);
+    if (p->pty != NULL) pty_resize(p->pty, p->cols, p->rows);
+  }
+}
+
+
+/* the pane under a point of the window, or NULL */
+static Pane *pane_at (int x, int y) {
+  int i, cx = (x - A.pad) / font_cell_w(), cy = (y - TOP - A.pad) / font_cell_h();
+  if (x < A.pad || y < TOP + A.pad) return NULL;
+  for (i = 0; i < CUR->npanes; i++) {
+    Pane *p = CUR->panes[i];
+    if (cx >= p->x && cx < p->x + p->cols && cy >= p->y && cy < p->y + p->rows) return p;
+  }
+  return NULL;
+}
+
+
+static void focus_pane (Pane *p) {
+  if (p == NULL || p == CP) return;
+  if (A.focused) focus_report(0);
+  CUR->focus = p;
+  show_tab();
+  if (A.focused) focus_report(1);
+}
+
+
+/* Alt+arrow: the pane next to this one in that direction */
+static void focus_toward (int dx, int dy) {
+  Pane *me = CP, *best = NULL;
+  int i, bestd = 1 << 30;
+  int mx = me->x + me->cols / 2, my = me->y + me->rows / 2;
+  for (i = 0; i < CUR->npanes; i++) {
+    Pane *p = CUR->panes[i];
+    int px = p->x + p->cols / 2, py = p->y + p->rows / 2, d;
+    if (p == me) continue;
+    if (dx > 0 && p->x < me->x + me->cols) continue;
+    if (dx < 0 && p->x + p->cols > me->x) continue;
+    if (dy > 0 && p->y < me->y + me->rows) continue;
+    if (dy < 0 && p->y + p->rows > me->y) continue;
+    d = (px - mx) * (px - mx) + (py - my) * (py - my);
+    if (d < bestd) {
+      bestd = d;
+      best = p;
+    }
+  }
+  focus_pane(best);
+}
+
+
+static Pane *pane_make (int cols, int rows);
+static int pane_spawn (Pane *p, char **cmd);
+static int split_has (const Split *s, const Pane *p);
+static void close_pane (Pane *p);
+
+
+/* splits the focused pane: side by side (vertical), or one above the other */
+static void split_pane (int vertical) {
+  Tab *t = CUR;
+  Pane *old = CP, *p;
+  Split *leaf, *s;
+  char *back;
+  int i;
+  if (t->npanes >= PANE_MAX || (vertical ? old->cols < 8 : old->rows < 4)) {
+    win_flash();
+    return;
+  }
+  for (leaf = t->root; leaf != NULL && leaf->pane != old;)	/* find the leaf of the focus */
+    leaf = (leaf->a != NULL && split_has(leaf->a, old)) ? leaf->a : leaf->b;
+  if (leaf == NULL) return;
+  p = pane_make(2, 2);
+  p->tab = t;
+  strcpy(p->cwd, old->cwd);
+  s = (Split *)xmalloc(sizeof(Split));	/* the leaf becomes a split of old and new */
+  memset(s, 0, sizeof(*s));
+  s->pane = old;
+  s->up = leaf;
+  leaf->a = s;
+  s = (Split *)xmalloc(sizeof(Split));
+  memset(s, 0, sizeof(*s));
+  s->pane = p;
+  s->up = leaf;
+  leaf->b = s;
+  leaf->pane = NULL;
+  leaf->vertical = vertical;
+  leaf->permille = 500;
+  t->panes[t->npanes++] = p;
+  layout_tab(t);
+  back = enter_cwd();	/* the new shell starts where the old one is */
+  i = pane_spawn(p, NULL);
+  leave_cwd(back);
+  if (i != 0) {
+    close_pane(p);
+    return;
+  }
+  focus_pane(p);
+  touch();
+}
+
+
+/* a pane goes; the one it shared its part with takes the room. The last
+** pane takes the tab with it */
+static void close_pane (Pane *p) {
+  Tab *t = p->tab;
+  Split *leaf, *up, *other;
+  int i, ti;
+  for (ti = 0; ti < A.ntabs && A.tabs[ti] != t; ti++)
+    ;
+  if (t->npanes == 1) {
+    close_tab(ti);
+    return;
+  }
+  for (leaf = t->root; leaf != NULL && leaf->pane != p;)
+    leaf = (leaf->a != NULL && split_has(leaf->a, p)) ? leaf->a : leaf->b;
+  if (leaf == NULL) return;
+  up = leaf->up;
+  A.div_drag = NULL;	/* the tree changes under it */
+  other = (up->a == leaf) ? up->b : up->a;
+  *up = (Split){other->pane, other->vertical, other->permille, other->a, other->b, up->up};
+  if (up->a) up->a->up = up;
+  if (up->b) up->b->up = up;
+  free(other);
+  free(leaf);
+  for (i = 0; i < t->npanes && t->panes[i] != p; i++)
+    ;
+  memmove(&t->panes[i], &t->panes[i + 1], (size_t)(t->npanes - i - 1) * sizeof(Pane *));
+  t->npanes--;
+  if (t->focus == p) t->focus = t->panes[i < t->npanes ? i : t->npanes - 1];
+  pane_free(p);
+  layout_tab(t);
+  if (t == CUR) show_tab();
+  touch();
+}
+
+
+/* is pane p somewhere under s? */
+static int split_has (const Split *s, const Pane *p) {
+  if (s == NULL) return 0;
+  if (s->pane != NULL) return s->pane == p;
+  return split_has(s->a, p) || split_has(s->b, p);
+}
+
+
+/* the cells a part covers: x0, y0 inclusive, x1, y1 not */
+static void split_box (const Split *s, int *x0, int *y0, int *x1, int *y1) {
+  if (s->pane != NULL) {
+    *x0 = s->pane->x;
+    *y0 = s->pane->y;
+    *x1 = s->pane->x + s->pane->cols;
+    *y1 = s->pane->y + s->pane->rows;
+    return;
+  }
+  {
+    int a0, b0, a1, b1, c0, d0, c1, d1;
+    split_box(s->a, &a0, &b0, &a1, &b1);
+    split_box(s->b, &c0, &d0, &c1, &d1);
+    *x0 = a0 < c0 ? a0 : c0;
+    *y0 = b0 < d0 ? b0 : d0;
+    *x1 = a1 > c1 ? a1 : c1;
+    *y1 = b1 > d1 ? b1 : d1;
+  }
+}
+
+
+/* the split whose line (in the middle of the gap between its two parts)
+** is within a cell of this point of the window */
+static Split *div_at (Split *s, int x, int y) {
+  int x0, y0, x1, y1, bx0, by0, bx1, by1, cw = font_cell_w(), ch = font_cell_h();
+  Split *in;
+  if (s == NULL || s->pane != NULL) return NULL;
+  split_box(s, &x0, &y0, &x1, &y1);
+  split_box(s->b, &bx0, &by0, &bx1, &by1);
+  if (s->vertical) {
+    int lx = A.pad + (bx0 - 1) * cw + cw / 2;
+    if (x >= lx - cw && x <= lx + cw && y >= TOP + A.pad + y0 * ch && y < TOP + A.pad + y1 * ch)
+      return s;
+  }
+  else {
+    int ly = TOP + A.pad + (by0 - 1) * ch + ch / 2;
+    if (y >= ly - ch / 2 - 2 && y <= ly + ch / 2 + 2 && x >= A.pad + x0 * cw && x < A.pad + x1 * cw)
+      return s;
+  }
+  if ((in = div_at(s->a, x, y)) != NULL) return in;
+  return div_at(s->b, x, y);
+}
+
+
+/* press on the line between two panes, drag it, let go: the parts get
+** their new shares. Returns 1 when the event was that. */
+static int div_mouse (int type, int button, int x, int y) {
+  int cx, cy;
+  if (CUR->npanes < 2 || x < A.pad || y < TOP + A.pad) {
+    if (type == TMS_UP) A.div_drag = NULL;
+    return A.div_drag != NULL && type != TMS_UP;
+  }
+  cx = (x - A.pad) / font_cell_w();
+  cy = (y - TOP - A.pad) / font_cell_h();
+  if (type == TMS_DOWN && button == 1) {
+    A.div_drag = div_at(CUR->root, x, y);
+    return A.div_drag != NULL;
+  }
+  if (A.div_drag == NULL) return 0;
+  if (type == TMS_UP) {
+    A.div_drag = NULL;
+    return 1;
+  }
+  if (type == TMS_MOVE) {
+    Split *s = A.div_drag;
+    int x0, y0, x1, y1, span, at, pm;
+    split_box(s, &x0, &y0, &x1, &y1);
+    span = s->vertical ? x1 - x0 - 1 : y1 - y0 - 1;
+    at = s->vertical ? cx - x0 : cy - y0;
+    if (span < 2) return 1;
+    pm = at * 1000 / span;
+    if (pm < 50) pm = 50;
+    if (pm > 950) pm = 950;
+    if (pm != s->permille) {
+      s->permille = pm;
+      layout_tab(CUR);
+      A.frame_ok = 0;
+      touch();
+    }
+    return 1;
+  }
+  return 1;
+}
+
+
+/* the gaps between the panes of the tab on screen, for the renderer */
+static void split_divs (const Split *s, Scene *sc) {
+  int x, y, w, h, x0, y0, x1, y1, bx0, by0, bx1, by1;
+  if (s == NULL || s->pane != NULL || sc->ndivs >= PANE_MAX) return;
+  split_box(s, &x0, &y0, &x1, &y1);
+  split_box(s->b, &bx0, &by0, &bx1, &by1);	/* the gap lies just before the second part */
+  if (s->vertical) {
+    x = A.pad + (bx0 - 1) * font_cell_w();
+    y = TOP + A.pad + y0 * font_cell_h();
+    w = font_cell_w();
+    h = (y1 - y0) * font_cell_h();
+  }
+  else {
+    x = A.pad + x0 * font_cell_w();
+    y = TOP + A.pad + (by0 - 1) * font_cell_h();
+    w = (x1 - x0) * font_cell_w();
+    h = font_cell_h();
+  }
+  sc->div[sc->ndivs][0] = x;
+  sc->div[sc->ndivs][1] = y;
+  sc->div[sc->ndivs][2] = w;
+  sc->div[sc->ndivs][3] = h;
+  sc->ndivs++;
+  split_divs(s->a, sc);
+  split_divs(s->b, sc);
+}
+
+/* }================================================================== */
 
 
 /* the last tab takes the window with it (and stays until then) */
@@ -1287,80 +2103,92 @@ static void close_tab (int i) {
 }
 
 
-/* the program of tab t ended */
-static void finish (Tab *t) {
+/* the program of pane p ended */
+static void finish (Pane *p) {
   char note[64];
-  int i;
-  if (t->done) return;
-  t->done = 1;
-  pty_exited(t->pty, &A.exit_code);
-  if (!t->hold) {
-    for (i = 0; i < A.ntabs; i++)
-      if (A.tabs[i] == t) {
-        close_tab(i);
-        break;
-      }
+  if (p->done) return;
+  p->done = 1;
+  pty_exited(p->pty, &A.exit_code);
+  if (!p->hold) {
+    close_pane(p);
     return;
   }
   sprintf(note, "\r\n\033[0;2m[process ended with code %d]\033[0m", A.exit_code);
-  vt_feed(&t->vt, note, strlen(note));
-  t->g->cursor_on = 0;
+  vt_feed(&p->vt, note, strlen(note));
+  p->g->cursor_on = 0;
   touch();
+}
+
+
+/* every pane of every tab, for loops: returns the count */
+static int all_panes (Pane **out) {
+  int i, k, n = 0;
+  for (i = 0; i < A.ntabs; i++)
+    for (k = 0; k < A.tabs[i]->npanes; k++) out[n++] = A.tabs[i]->panes[k];
+  return n;
+}
+
+
+static int pane_alive (Pane *p) {
+  Pane *all[TAB_MAX * PANE_MAX];
+  int i, n = all_panes(all);
+  for (i = 0; i < n; i++)
+    if (all[i] == p) return 1;
+  return 0;
 }
 
 
 void app_on_wake (void) {
   static char buf[65536];
-  int i = 0;
-  while (i < A.ntabs) {
-    Tab *t = A.tabs[i];
+  Pane *all[TAB_MAX * PANE_MAX];
+  int i, n = all_panes(all);
+  for (i = 0; i < n; i++) {
+    Pane *p = all[i];
     size_t total = 0;
-    long n = 0;
-    int before = A.ntabs;
-    if (t->pty == NULL) {
-      i++;
-      continue;
-    }
+    long got = 0;
+    if (!pane_alive(p) || p->pty == NULL) continue;	/* closed by one before it */
     /* with --hold keep reading after the end: late output still arrives */
-    while ((n = pty_read(t->pty, buf, sizeof(buf))) > 0) {
-      vt_feed(&t->vt, buf, (size_t)n);
-      total += (size_t)n;
+    while ((got = pty_read(p->pty, buf, sizeof(buf))) > 0) {
+      vt_feed(&p->vt, buf, (size_t)got);
+      total += (size_t)got;
       if (total > ((size_t)2 << 20)) {	/* stay responsive under a flood */
         win_wake();
         break;
       }
     }
-    if (total > 0 && t == CUR) {
-      if (A.has_sel && !A.selecting && A.g->view == 0) A.has_sel = 0;
+    if (total > 0 && p == CP) {
+      if (A.has_sel && !A.selecting && A.g->view == 0 && !A.finding) A.has_sel = 0;
+      A.has_hot = 0;
       touch();
     }
-    else if (total > 0 && !t->news && A.now > A.quiet_until) {
-      t->news = 1;	/* not for the repaint every shell does on a resize */
+    else if (total > 0 && p->tab == CUR) touch();	/* another pane on screen */
+    else if (total > 0 && !p->tab->news && A.now > A.quiet_until) {
+      p->tab->news = 1;	/* not for the repaint every shell does on a resize */
       touch();
     }
-    if (n < 0 || (n == 0 && pty_exited(t->pty, NULL))) finish(t);
-    if (A.ntabs == before) i++;	/* else tab i is gone and i is the next one */
+    if (got < 0 || (got == 0 && pty_exited(p->pty, NULL))) finish(p);
   }
 }
 
 
 int app_fds (int *fds, int max) {
-  int i, n = 0;
-  for (i = 0; i < A.ntabs && n < max; i++)
-    if (A.tabs[i]->pty != NULL && pty_fd(A.tabs[i]->pty) >= 0)
-      fds[n++] = pty_fd(A.tabs[i]->pty);
+  Pane *all[TAB_MAX * PANE_MAX];
+  int i, n = 0, np = all_panes(all);
+  for (i = 0; i < np && n < max; i++)
+    if (all[i]->pty != NULL && pty_fd(all[i]->pty) >= 0) fds[n++] = pty_fd(all[i]->pty);
   return n;
 }
 
 
 /* the window closes: every shell ends; the screens stay until exit */
 void app_close_all (void) {
-  int i;
-  for (i = 0; i < A.ntabs; i++) {
-    if (A.tabs[i]->pty == NULL) continue;
-    pty_close(A.tabs[i]->pty);
-    A.tabs[i]->pty = NULL;
-    A.tabs[i]->done = 1;
+  Pane *all[TAB_MAX * PANE_MAX];
+  int i, n = all_panes(all);
+  for (i = 0; i < n; i++) {
+    if (all[i]->pty == NULL) continue;
+    pty_close(all[i]->pty);
+    all[i]->pty = NULL;
+    all[i]->done = 1;
   }
 }
 
@@ -1387,7 +2215,20 @@ void app_on_tick (unsigned now) {
   if (A.focused && A.cfg.cursor_blink && now - A.blink_at >= 530) {
     A.blink_on = !A.blink_on;
     A.blink_at = now;
+    if (A.g->cy < A.g->rows) A.g->screen[A.g->cy].dirty = 1;	/* only its row */
     touch();
+  }
+  if (now - A.tblink_at >= 500) {	/* SGR 5: blinking text */
+    int y, x, any = 0;
+    A.tblink_at = now;
+    for (y = 0; y < A.g->rows && !any; y++) {
+      const Line *l = grid_view_line(A.g, y);
+      for (x = 0; l != NULL && x < l->n && !any; x++) any = (l->c[x].attr & A_BLINK) != 0;
+    }
+    if (any || !A.tblink) {
+      A.tblink = any ? !A.tblink : 1;
+      touch();
+    }
   }
   if (A.selecting) {	/* dragging beyond the edge scrolls */
     if (A.mouse_y < TOP + A.pad) scroll_view(1);
@@ -1397,15 +2238,20 @@ void app_on_tick (unsigned now) {
     A.bar_until = 0;
     touch();
   }
+  if (A.dirty && A.sync_since != 0) win_redraw();	/* a held screen: try again */
   if (A.pill_until != 0 && now > A.pill_until && !A.resizing) {
     A.pill_until = 0;
     touch();
   }
-  for (i = 0; i < A.ntabs; i++)
-    if (!A.tabs[i]->done && A.tabs[i]->pty != NULL && pty_exited(A.tabs[i]->pty, NULL)) {
-      app_on_wake();
-      break;
-    }
+  {
+    Pane *all[TAB_MAX * PANE_MAX];
+    int n = all_panes(all);
+    for (i = 0; i < n; i++)
+      if (!all[i]->done && all[i]->pty != NULL && pty_exited(all[i]->pty, NULL)) {
+        app_on_wake();
+        break;
+      }
+  }
 }
 
 
@@ -1414,7 +2260,7 @@ static void build_scene (void) {
   int i;
   memset(s, 0, sizeof(*s));
   s->g = A.g;
-  s->t = &CUR->theme;
+  s->t = &CP->theme;
   s->pad = A.pad;
   s->strip = A.strip;
   s->head = A.head;
@@ -1426,7 +2272,7 @@ static void build_scene (void) {
   s->hot_close = A.hot_close;
   for (i = 0; i < A.ntabs; i++) {
     const Tab *t = A.tabs[i];
-    s->tab_title[i] = t->label[0] ? t->label : t->title[0] ? t->title : t->name;
+    s->tab_title[i] = t->label[0] ? t->label : t->focus->title[0] ? t->focus->title : t->focus->name;
     s->tab_news[i] = (unsigned char)t->news;
   }
   s->hot_button = A.hot_button;
@@ -1436,10 +2282,22 @@ static void build_scene (void) {
   s->ascent = font_ascent();
   s->focused = A.focused;
   s->blink_on = A.blink_on || !A.cfg.cursor_blink;
+  s->text_blink_on = A.tblink;
   s->cursor_style = A.cfg.cursor;
   s->no_bold = A.cfg.no_bold;
   s->has_sel = A.has_sel;
   if (A.has_sel) sel_range(&s->sx0, &s->sy0, &s->sx1, &s->sy1);
+  s->has_hot = A.has_hot;
+  s->hx0 = A.hx0;
+  s->hy0 = A.hy0;
+  s->hx1 = A.hx1;
+  s->hy1 = A.hy1;
+  if (A.finding) {
+    if (A.find[0] == '\0') sprintf(A.find_box, "find: \xe2\x96\x8f");
+    else if (A.fcount == 0) sprintf(A.find_box, "find: %s\xe2\x96\x8f  no match", A.find);
+    else sprintf(A.find_box, "find: %s\xe2\x96\x8f  %d/%d", A.find, A.fcur + 1, A.fcount);
+    s->find = A.find_box;
+  }
   s->bar_alpha = (A.bar_drag || A.bar_hover) ? 230 :
                  (A.g->view > 0 || A.bar_until != 0) ? 150 : 0;
   s->pill = (A.pill_until != 0) ? A.pill : NULL;
@@ -1449,14 +2307,105 @@ static void build_scene (void) {
     s->pill = A.edit_pill;
   }
   s->menu = &A.menu;
+  if (CUR->npanes > 1) {	/* a split tab: every pane where it is */
+    for (i = 0; i < CUR->npanes; i++) {
+      const Pane *p = CUR->panes[i];
+      s->pane[i].g = p->g;
+      s->pane[i].t = &p->theme;
+      s->pane[i].x = A.pad + p->x * s->cw;
+      s->pane[i].y = TOP + A.pad + p->y * s->ch;
+      s->pane[i].w = p->cols * s->cw;
+      s->pane[i].h = p->rows * s->ch;
+      s->pane[i].focused = (p == CP);
+    }
+    s->npanes = CUR->npanes;
+    s->ox = A.pad + CP->x * s->cw;
+    s->oy = TOP + A.pad + CP->y * s->ch;
+    split_divs(CUR->root, s);
+  }
+}
+
+
+static uint32_t mix_in (uint32_t h, const void *p, size_t n) {
+  const unsigned char *b = (const unsigned char *)p;
+  size_t i;
+  for (i = 0; i < n; i++) {
+    h ^= b[i];
+    h *= 16777619u;
+  }
+  return h;
+}
+
+
+static uint32_t mix_str (uint32_t h, const char *s) {
+  return s ? mix_in(h, s, strlen(s) + 1) : mix_in(h, "", 1);
+}
+
+
+/* a fingerprint of all the scene shows besides the rows of the grids:
+** when it is the same as last time, only dirty rows need drawing */
+static uint32_t look_of (const Scene *s) {
+  uint32_t h = 2166136261u;
+  int v[40], i, n = 0;
+  v[n++] = s->head; v[n++] = s->bar; v[n++] = s->strip; v[n++] = s->pad;
+  v[n++] = s->ntabs; v[n++] = s->cur_tab; v[n++] = s->hot_tab; v[n++] = s->hot_close;
+  v[n++] = s->hot_button; v[n++] = s->maximized; v[n++] = s->cw; v[n++] = s->ch;
+  v[n++] = s->focused; v[n++] = s->cursor_style; v[n++] = s->no_bold;
+  v[n++] = s->has_sel; v[n++] = s->sx0; v[n++] = s->sy0; v[n++] = s->sx1; v[n++] = s->sy1;
+  v[n++] = s->has_hot; v[n++] = s->hx0; v[n++] = s->hy0; v[n++] = s->hx1; v[n++] = s->hy1;
+  v[n++] = s->bar_alpha; v[n++] = s->text_blink_on; v[n++] = s->npanes;
+  v[n++] = s->ox; v[n++] = s->oy; v[n++] = s->ndivs; v[n++] = s->g->view;
+  v[n++] = s->g->cols; v[n++] = s->g->rows; v[n++] = A.frame.w; v[n++] = A.frame.h;
+  h = mix_in(h, v, (size_t)n * sizeof(int));
+  h = mix_in(h, s->t, sizeof(Theme));
+  h = mix_str(h, s->title);
+  h = mix_str(h, s->edit);
+  h = mix_str(h, s->pill);
+  h = mix_str(h, s->find);
+  for (i = 0; i < s->ntabs; i++) {
+    h = mix_str(h, s->tab_title[i]);
+    h = mix_in(h, &s->tab_news[i], 1);
+  }
+  for (i = 0; i < s->npanes; i++) {
+    h = mix_in(h, &s->pane[i].x, 5 * sizeof(int));
+    h = mix_in(h, s->pane[i].t, sizeof(Theme));
+  }
+  if (s->menu != NULL) h = mix_in(h, s->menu, sizeof(Menu));
+  return h;
+}
+
+
+/* what was drawn is clean now */
+static void clean_grid (Grid *g) {
+  int r;
+  g->all_dirty = 0;
+  for (r = 0; r < g->rows; r++) {
+    const Line *l = grid_view_line(g, r);
+    if (l != NULL) ((Line *)l)->dirty = 0;
+    g->screen[r].dirty = 0;
+  }
 }
 
 
 const Frame *app_render (void) {
   if (!A.dirty || A.g == NULL || A.frame.px == NULL) return NULL;
+  if (A.g->sync) {	/* 2026: the program is still drawing */
+    if (A.sync_since == 0) A.sync_since = A.now ? A.now : 1;
+    if (A.now - A.sync_since < 200) return NULL;
+  }
+  A.sync_since = 0;
   A.dirty = 0;
   build_scene();
-  draw_scene(&A.frame, &A.scene);
+  {
+    uint32_t look = look_of(&A.scene);
+    int i, full = !A.frame_ok || look != A.look;
+    for (i = 0; i < CUR->npanes && !full; i++) full = CUR->panes[i]->g->all_dirty;
+    if (full) draw_scene(&A.frame, &A.scene);
+    else if (!draw_scene_rows(&A.frame, &A.scene)) return NULL;	/* nothing changed */
+    A.look = look;
+    A.frame_ok = 1;
+    for (i = 0; i < CUR->npanes; i++) clean_grid(CUR->panes[i]->g);
+  }
   return &A.frame;
 }
 
@@ -1469,11 +2418,31 @@ const Frame *app_render (void) {
 ** ===================================================================
 */
 
-/* a tab with its screen and parser, nothing running in it yet */
-static Tab *tab_make (int cols, int rows) {
+/* a tab of one pane */
+static Tab *tab_new (Pane *p) {
   Tab *t = (Tab *)xmalloc(sizeof(Tab));
   memset(t, 0, sizeof(*t));
+  t->root = (Split *)xmalloc(sizeof(Split));
+  memset(t->root, 0, sizeof(Split));
+  t->root->pane = p;
+  t->panes[0] = p;
+  t->npanes = 1;
+  t->focus = p;
+  p->tab = t;
+  p->x = p->y = 0;
+  p->cols = p->g->cols;
+  p->rows = p->g->rows;
+  return t;
+}
+
+
+/* a pane with its screen and parser, nothing running in it yet */
+static Pane *pane_make (int cols, int rows) {
+  Pane *t = (Pane *)xmalloc(sizeof(Pane));
+  memset(t, 0, sizeof(*t));
   t->g = grid_new(cols, rows, A.cfg.scrollback);
+  t->g->cell_w = font_cell_w();
+  t->g->cell_h = font_cell_h();
   vt_init(&t->vt, t->g);
   t->vt.ud = t;
   t->vt.reply = on_reply;
@@ -1537,9 +2506,11 @@ int app_init (const AppArgs *args, const char *argv0) {
   A.scale = win_scale();
   apply_font();
   theme_apply(&A.theme, theme_find(A.cfg.theme), &A.cfg);
-  A.tabs[0] = tab_make(A.cfg.cols, A.cfg.rows);
+  A.tabs[0] = tab_new(pane_make(A.cfg.cols, A.cfg.rows));
   A.ntabs = 1;
-  A.g = CUR->g;
+  A.cols = A.cfg.cols;
+  A.rows = A.cfg.rows;
+  A.g = CP->g;
   A.focused = A.blink_on = 1;
   return 0;
 }
@@ -1584,8 +2555,8 @@ static char *find_program (const char *name) {
 }
 
 
-/* starts 'cmd' (NULL: the shell) in tab t; 0 if it runs */
-static int tab_spawn (Tab *t, char **cmd) {
+/* starts 'cmd' (NULL: the shell) in pane t; 0 if it runs */
+static int pane_spawn (Pane *t, char **cmd) {
   char *one[2];
   char **argv = cmd;
   char *exe;
@@ -1631,8 +2602,8 @@ static int tab_spawn (Tab *t, char **cmd) {
 
 int app_start (void) {
   int ok;
-  CUR->hold = A.args.hold;
-  ok = tab_spawn(CUR, A.args.cmd);
+  CP->hold = A.args.hold;
+  ok = pane_spawn(CP, A.args.cmd);
   set_theme(A.cfg.theme, 0);
   win_set_opacity(A.cfg.opacity);
   return ok;
@@ -1642,21 +2613,23 @@ int app_start (void) {
 /* a new tab with the shell, in the folder of the tab on screen, at the end */
 static void new_tab (void) {
   Tab *t;
+  Pane *p;
   char *back;
   int ok;
   if (A.ntabs >= TAB_MAX) {
     win_flash();
     return;
   }
-  t = tab_make(A.g->cols, A.g->rows);
-  strcpy(t->cwd, CUR->cwd);
+  p = pane_make(A.cols, A.rows);
+  strcpy(p->cwd, CP->cwd);
   back = enter_cwd();
-  ok = tab_spawn(t, NULL);
+  ok = pane_spawn(p, NULL);
   leave_cwd(back);
   if (ok != 0) {
-    tab_free(t);
+    pane_free(p);
     return;
   }
+  t = tab_new(p);
   A.tabs[A.ntabs++] = t;
   switch_tab(A.ntabs - 1);
   apply_bar();
@@ -1691,19 +2664,22 @@ int app_render_test (const char *native) {
     "\033[47;30m dark text on a light background \033[0m\r\n$ ";
   int w, h;
   grid_resize(A.g, 86, 11);
+  A.cols = 86;
+  A.rows = 11;
+  layout_tab(CUR);
   /* two more tabs show the tab bar: one with a title, one with news */
-  A.tabs[1] = tab_make(86, 11);
-  strcpy(A.tabs[1]->title, "nvim notes.txt");
-  A.tabs[2] = tab_make(86, 11);
-  strcpy(A.tabs[2]->name, "build");
+  A.tabs[1] = tab_new(pane_make(86, 11));
+  strcpy(A.tabs[1]->focus->title, "nvim notes.txt");
+  A.tabs[2] = tab_new(pane_make(86, 11));
+  strcpy(A.tabs[2]->focus->name, "build");
   A.tabs[2]->news = 1;
   A.ntabs = 3;
   A.bar = bar_height();
-  size_for(A.g->cols, A.g->rows, &w, &h);
+  size_for(A.cols, A.rows, &w, &h);
   frame_resize(&A.frame, w, h);
   A.win_w = w;
   A.win_h = h;
-  vt_feed(&CUR->vt, sample, strlen(sample));
+  vt_feed(&CP->vt, sample, strlen(sample));
   A.dirty = 1;
   build_scene();
   draw_scene(&A.frame, &A.scene);

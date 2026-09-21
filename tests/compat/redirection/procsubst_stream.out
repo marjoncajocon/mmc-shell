@@ -1,0 +1,8 @@
+read 3 lines of an endless one
+mapfile: one two three
+source: ok
+reader got data
+to stderr
+x 1
+y 2
+status: 0

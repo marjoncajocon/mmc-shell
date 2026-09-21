@@ -588,6 +588,11 @@ static Tok *lex (Parser *p) {
     if (ch(p, i) == '{') {
       j++;
       while (isalnum(ch(p, j)) || ch(p, j) == '_') j++;
+      if (ch(p, j) == '[' && j > i + 1) {	/* {arr[1]}>: an element */
+        size_t k = j + 1;
+        while (ch(p, k) != '\0' && ch(p, k) != ']' && ch(p, k) != '\n' && ch(p, k) != '}') k++;
+        if (ch(p, k) == ']') j = k + 1;
+      }
       if (ch(p, j) == '}' && j > i + 1 && (ch(p, j + 1) == '<' || ch(p, j + 1) == '>') &&
           !p->cond) {
         Tok op;
@@ -1588,7 +1593,23 @@ static Node *parse_command (Parser *p) {
       consume(p);
       n = new_node(p, N_COPROC, line);
       if (lex(p)->type == T_WORD && is_name(lex(p)->text) && !parse_is_keyword(lex(p)->text)) {
-        /* coproc NAME compound: the name is optional */
+        /* coproc NAME compound: a name only counts before a compound command */
+        static const char *const compound[] = {"{", "(", "while", "until", "for", "if",
+                                               "case", "select", "[[", "((", NULL};
+        const char *after = p->in.s + p->pos;
+        int k;
+        while (*after == ' ' || *after == '\t') after++;
+        for (k = 0; compound[k] != NULL; k++) {
+          size_t cl = strlen(compound[k]);
+          if (strncmp(after, compound[k], cl) == 0 &&
+              (cl == 1 || compound[k][0] == '[' || compound[k][0] == '(' ||
+               after[cl] == ' ' || after[cl] == '\t' || after[cl] == '\n' || after[cl] == ';'))
+            break;
+        }
+        if (compound[k] != NULL) {
+          n->str = a_strdup(p->prog->arena, lex(p)->text);
+          consume(p);
+        }
       }
       n->a = parse_command(p);
       p->depth--;

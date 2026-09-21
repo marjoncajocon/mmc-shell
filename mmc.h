@@ -87,6 +87,7 @@ int m_fnncmp (const char *a, const char *b, size_t n);
 int m_envcmp (const char *a, const char *b);	/* env-name compare */
 size_t utf8_count (const char *s, size_t nbytes);
 int utf8_len (const char *s);	/* bytes of the character at s */
+int uc_width (unsigned long cp);	/* terminal columns: 0, 1 or 2 */
 char *ll_to_str (long long v, char *out);	/* out: >= 24 bytes */
 int is_name (const char *s);	/* [A-Za-z_][A-Za-z0-9_]* */
 int is_name_n (const char *s, size_t n);
@@ -173,7 +174,14 @@ const char *os_machine (void);	/* $MACHTYPE / $HOSTTYPE */
 int os_spawn (const char *exe, char **argv, char **envp, const int *fds,
               int nfds, OsProc *proc, long *pid);
 int os_wait (OsProc proc);
-int os_poll_proc (OsProc proc, int *status);	/* 1 finished, 0 running */
+int os_poll_proc (OsProc proc, int *status);	/* 1 finished, 0 running, 2 stopped */
+/* job control (POSIX terminals; Windows: none, but kill -STOP / -CONT work) */
+int os_job_control (int interactive);	/* at start: 1 when it is on */
+int os_job_active (void);
+void os_job_pgid (long pgid);	/* programs started from now on join group pgid (0: a new one, -1: ours) */
+void os_tty_give (long pgid);	/* the terminal to group pgid, 0: back to the shell */
+int os_wait_fg (OsProc proc, int *stopped);	/* os_wait; *stopped: Ctrl-Z stopped it */
+int os_suspend_self (void);
 void os_detach (OsProc proc);
 int os_kill (long pid, int sig);
 int os_exec (const char *exe, char **argv, char **envp);	/* POSIX only */
@@ -183,11 +191,17 @@ int os_can_exec_replace (void);
 extern volatile int os_interrupted;
 void os_catch_signal (int sig, int on);	/* trap: deliver to os_pending */
 extern volatile int os_pending[65];
+extern int os_pipe_exit;	/* Windows: a write into a pipe nobody reads ends us (SIGPIPE) */
 
 typedef struct OsThread OsThread;
 typedef void (*OsThreadFn) (void *arg);
 OsThread *os_thread_start (OsThreadFn fn, void *arg);
 void os_thread_join (OsThread *t);
+/* a pipe a program opens by its path (<( ) and >( )); to_reader: what is
+** written into fd comes out there, else what is written there comes out of fd */
+typedef struct OsNPipe OsNPipe;
+OsNPipe *os_npipe_new (const char *dir, int fd, int to_reader, char **path);	/* takes fd */
+void os_npipe_end (OsNPipe *np);
 
 /* }================================================================== */
 
@@ -272,6 +286,7 @@ int var_in_function (void);
 void var_scope_push (void);
 void var_scope_pop (void);
 void var_env (Vec *out);	/* "NAME=value" of what is exported */
+void var_env_funcs (Vec *out);	/* BASH_FUNC_x%%= entries we were given */
 void var_names (Vec *out, const char *prefix, int all);
 void var_all (Vec *out);	/* Var * of every visible variable, sorted */
 void *var_save (void);	/* a copy of everything, for subshells */
@@ -470,6 +485,10 @@ int sh_eval_argv (int argc, char **argv, int in, int out, int err, int flags);
 #define EX_BUILTIN_ONLY	4	/* 'builtin' */
 char *sh_capture (const char *src, size_t *len);	/* $( ) */
 char *sh_procsubst (const char *src, int write);	/* <( ) >( ): a path */
+void *sh_procsubst_mark (void);	/* cleanup_to(mark): only what came after */
+void sh_procsubst_cleanup_to (void *mark);
+int sh_dev_fd (const char *path);	/* /dev/stdin, /dev/fd/N ...: N, else -1 */
+char *sh_fd_to_file (int k);	/* fd k read to its end into a temporary file */
 void sh_procsubst_cleanup (void);
 void sh_error (const char *fmt, ...);	/* "mmc: line N: ..." */
 void sh_run_traps (void);
@@ -497,6 +516,8 @@ void func_define (const char *name, Node *body, const char *src);
 int func_unset (const char *name);
 void func_names (Vec *out);
 char *func_pretty (Func *f);	/* the way bash prints it */
+void func_env (Vec *out);	/* export -f: BASH_FUNC_name%%=() { ... }, like bash */
+void func_import_env (void);	/* and the ones a parent shell exported */
 int func_call (Func *f, int argc, char **argv);
 
 /* traps */
@@ -530,10 +551,15 @@ typedef struct Job {
   int nprocs, running;
   int status;	/* when done */
   int notified;
+  int stopped;	/* Ctrl-Z, kill -STOP: fg and bg let it go on */
+  long pgid;	/* its process group (job control) */
   char *cmd;
 } Job;
 
 Job *job_add (const char *cmd, OsProc *procs, long *pids, int n);
+Job *job_stopped (const char *cmd, OsProc *procs, long *pids, int n, long pgid);	/* Ctrl-Z */
+int job_stopped_count (void);
+void job_hup_stopped (void);	/* the shell goes: stopped jobs get HUP and CONT, like bash */
 Job *job_find (const char *spec);	/* %1 %+ %- %name pid */
 Job *job_by_pid (long pid);
 int job_wait (Job *j);	/* status of the last process */

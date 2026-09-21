@@ -510,6 +510,26 @@ void win_message (const char *title, const char *text) {
 }
 
 
+/* the desktop's own opener takes it to the browser */
+void win_open_url (const char *utf8) {
+  static const char *const openers[] = {"/usr/bin/open", NULL};
+  static const int fds[3] = {0, 1, 2};
+  int i;
+  for (i = 0; openers[i] != NULL; i++) {
+    OsStat st;
+    char *argv[3];
+    OsProc proc;
+    long pid;
+    if (os_stat(openers[i], &st) != 0) continue;
+    argv[0] = (char *)openers[i];
+    argv[1] = (char *)utf8;
+    argv[2] = NULL;
+    if (os_spawn(openers[i], argv, NULL, fds, 3, &proc, &pid) == 0) os_detach(proc);
+    return;
+  }
+}
+
+
 /* the window manager draws the title bar here */
 int win_custom_chrome (int want) { (void)want; return 0; }
 void win_minimize (void) { }

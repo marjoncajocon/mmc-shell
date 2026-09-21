@@ -13,6 +13,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <windowsx.h>
+#include <shellapi.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -614,6 +615,13 @@ void win_message (const char *title, const char *text) {
   MessageBoxW(hwnd, wx, wt, MB_OK | MB_ICONINFORMATION);
   free(wt);
   free(wx);
+}
+
+
+void win_open_url (const char *utf8) {
+  wchar_t *w = widen(utf8);
+  ShellExecuteW(hwnd, L"open", w, NULL, NULL, SW_SHOWNORMAL);
+  free(w);
 }
 
 #else

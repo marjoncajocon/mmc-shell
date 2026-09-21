@@ -297,13 +297,46 @@ static void setup_tree (void) {
 }
 
 
-static void source_config (int top_level, int norc, int noprofile) {
+/* sources a file of the home folder if it is there; 1 if it was */
+static int source_home (const char *name) {
+  char *f = path_join(g_home, name);
+  OsStat st;
+  int there = os_stat(f, &st) == 0 && !st.is_dir;
+  if (there) sh_source(f, 0, NULL, 0);
+  free(f);
+  return there;
+}
+
+
+/*
+** The startup files:
+**   /etc/profile      the first shell (nested ones inherit what it set)
+**   ~/.mmc_profile    a login shell (-l, or started as "-mmc"); else ~/.profile
+**   ~/.mmcrc          interactive shells (--rcfile FILE instead), and the
+**                     first shell of a script, so that programs it starts
+**                     get what it sets up
+**   $MMC_ENV          a script, like bash's $BASH_ENV (that one too)
+**   ~/.mmc_logout     when a login shell ends
+*/
+static void source_config (int top_level, int norc, int noprofile, const char *rcfile) {
   char *etc = path_join(path_root(), "etc");
   char *profile = path_join(etc, "profile");
-  char *rc = path_join(g_home, ".mmcrc");
+  char *rc = rcfile ? path_to_native(rcfile) : path_join(g_home, ".mmcrc");
   if (top_level && !noprofile) sh_source(profile, 0, NULL, 0);	/* nested shells inherit it */
+  if (sh_login && !noprofile && !source_home(".mmc_profile")) source_home(".profile");
   if ((top_level || sh_interactive) && sh_interactive && !norc) sh_source(rc, 0, NULL, 0);
   else if (top_level && !norc && !noprofile) sh_source(rc, 0, NULL, 0);
+  if (!sh_interactive) {	/* $MMC_ENV, $BASH_ENV: a file every script reads first */
+    const char *e = var_get("MMC_ENV");
+    if (e == NULL || *e == '\0') e = var_get("BASH_ENV");
+    if (e != NULL && *e != '\0') {
+      char *file = expand_str(e), *native = path_to_native(file);
+      OsStat st;
+      if (os_stat(native, &st) == 0 && !st.is_dir) sh_source(native, 0, NULL, 0);
+      free(native);
+      free(file);
+    }
+  }
   sh_status = 0;
   sh_exit = 0;
   free(etc); free(profile); free(rc);
@@ -1037,13 +1070,21 @@ static void repl (void) {
     if (sh_interactive) {
       os_interrupted = 0;
       if (sh_exit && job_count() > 0) {
-        if (opt_get("checkjobs") && !warned_jobs) {	/* like bash: ask once */
+        if (job_stopped_count() > 0 && !warned_jobs) {	/* like bash: once */
+          fd_puts(2, "mmc: there are stopped jobs.\n");
+          warned_jobs = 1;
+          sh_exit = 0;
+        }
+        else if (opt_get("checkjobs") && !warned_jobs) {	/* like bash: ask once */
           fd_puts(2, "mmc: there are running jobs.\n");
           job_list(2, 0);
           warned_jobs = 1;
           sh_exit = 0;
         }
-        else if (opt_get("huponexit")) job_hup_all();
+        else {
+          job_hup_stopped();	/* stopped ones would wait for ever */
+          if (opt_get("huponexit")) job_hup_all();
+        }
       }
     }
   }
@@ -1136,10 +1177,6 @@ static void check_node (Check *c, Node *n) {
         }
       }
       break;
-    case N_COPROC:
-      fd_printf(1, "%s:%d: coproc is not supported by mmc\n", c->file, n->line);
-      c->problems++;
-      break;
     default:
       break;
   }
@@ -1215,6 +1252,7 @@ static int usage (int fd) {
     "  --check file...  check scripts: syntax, and commands that do not exist\n"
     "  --complete LINE  what Tab would offer for that command line\n"
     "  --norc           do not read ~/.mmcrc\n"
+    "  --rcfile FILE    read FILE instead of ~/.mmcrc\n"
     "  --noprofile      do not read /etc/profile\n"
     "  --root DIR       use DIR as the MMC folder instead of the program's\n"
     "  --version        print the version\n"
@@ -1229,6 +1267,7 @@ int main (int argc, char **argv) {
   long stage_pid = 0;
   char *cwd, *exedir;
   int i, top_level, norc = 0, noprofile = 0, from_stdin = 0, check = 0, force_i = 0;
+  const char *rcfile = NULL;
   const char *complete_line = NULL;
   int have_script = 0;
   Vec setopts;	/* -e -x -o pipefail ... applied after setup */
@@ -1247,6 +1286,7 @@ int main (int argc, char **argv) {
     else if (strcmp(a, "--stage") == 0 && i + 2 < argc) {
       stage_file = argv[++i];
       stage_pid = atol(argv[++i]);
+      os_pipe_exit = 1;	/* a pipeline stage stops when its reader has gone */
     }
     else if (strcmp(a, "--check") == 0) {
       check = 1;
@@ -1256,6 +1296,8 @@ int main (int argc, char **argv) {
     else if (strcmp(a, "--complete") == 0 && i + 1 < argc) complete_line = argv[++i];
     else if (strcmp(a, "--norc") == 0) norc = 1;
     else if (strcmp(a, "--noprofile") == 0) noprofile = 1;
+    else if ((strcmp(a, "--rcfile") == 0 || strcmp(a, "--init-file") == 0) && i + 1 < argc)
+      rcfile = argv[++i];
     else if (strcmp(a, "--login") == 0 || strcmp(a, "-l") == 0) sh_login = 1;
     else if (strcmp(a, "--posix") == 0) vec_push(&setopts, xstrdup("-oposix"));
     else if (strcmp(a, "--") == 0 || strcmp(a, "-") == 0) {
@@ -1314,6 +1356,7 @@ int main (int argc, char **argv) {
     for (; i < argc; i++) vec_push(&sh_pos, xstrdup(argv[i]));	/* script args */
   }
   var_init();
+  func_import_env();	/* export -f from a parent mmc or bash */
   top_level = var_get("MMC_LEVEL") == NULL;
   setup_root(argv[0], root);
   setup_env();
@@ -1345,10 +1388,12 @@ int main (int argc, char **argv) {
   sh_interactive = force_i || complete_line != NULL ||
                    (command == NULL && !have_script && os_is_tty(0) && !from_stdin);
   if (sh_interactive) opt_set("monitor", 1);
+  os_job_control(sh_interactive && complete_line == NULL);	/* Ctrl-Z, fg, bg */
   opt_set("expand_aliases", sh_interactive);	/* bash: scripts do not expand aliases */
   if (sh_login) opt_set("login_shell", 1);
   if (sh_pos.n == 0) vec_push(&sh_pos, xstrdup(MMC_NAME));
-  source_config(top_level, norc, noprofile);
+  if (argv[0] != NULL && argv[0][0] == '-') sh_login = 1;	/* "-mmc": a login shell */
+  source_config(top_level, norc, noprofile, rcfile);
   {	/* -e -x -o pipefail ... from the command line */
     size_t k;
     for (k = 0; k < setopts.n; k++) {
@@ -1405,6 +1450,12 @@ int main (int argc, char **argv) {
     free(cwd);
     free(exedir);
     repl();
+  }
+  if (sh_login && stage_file == NULL) {	/* ~/.mmc_logout, keeping the status */
+    int st = sh_status;
+    sh_exit = 0;
+    source_home(".mmc_logout");
+    sh_status = st;
   }
   sh_exit_now(sh_status);
   os_shutdown();

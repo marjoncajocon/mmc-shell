@@ -160,9 +160,38 @@ Pty *pty_spawn (const char *exe, char **argv, int cols, int rows) {
   void *pcon = NULL;
   Pty *p;
   int i, ok;
-  fn_create.raw = GetProcAddress(k32, "CreatePseudoConsole");
-  fn_resize.raw = GetProcAddress(k32, "ResizePseudoConsole");
-  fn_close.raw = GetProcAddress(k32, "ClosePseudoConsole");
+  fn_create.raw = fn_resize.raw = fn_close.raw = NULL;
+  {	/* a newer ConPTY next to us (conpty.dll with its OpenConsole.exe, as
+    ** Windows Terminal ships them) passes sixel images on; the system's
+    ** does not. Only our own folder is looked in. */
+    static HMODULE own = NULL;
+    static int tried = 0;
+    if (!tried) {
+      wchar_t path[MAX_PATH + 16];
+      DWORD n = GetModuleFileNameW(NULL, path, MAX_PATH);
+      tried = 1;
+      while (n > 0 && path[n - 1] != L'\\') n--;
+      if (n > 0) {
+        wcscpy(path + n, L"conpty.dll");
+        own = LoadLibraryW(path);
+      }
+    }
+    if (own != NULL) {
+      fn_create.raw = GetProcAddress(own, "CreatePseudoConsole");
+      fn_resize.raw = GetProcAddress(own, "ResizePseudoConsole");
+      fn_close.raw = GetProcAddress(own, "ClosePseudoConsole");
+      if (fn_create.raw == NULL) {	/* the NuGet package's names */
+        fn_create.raw = GetProcAddress(own, "ConptyCreatePseudoConsole");
+        fn_resize.raw = GetProcAddress(own, "ConptyResizePseudoConsole");
+        fn_close.raw = GetProcAddress(own, "ConptyClosePseudoConsole");
+      }
+    }
+  }
+  if (fn_create.raw == NULL || fn_resize.raw == NULL || fn_close.raw == NULL) {
+    fn_create.raw = GetProcAddress(k32, "CreatePseudoConsole");
+    fn_resize.raw = GetProcAddress(k32, "ResizePseudoConsole");
+    fn_close.raw = GetProcAddress(k32, "ClosePseudoConsole");
+  }
   if (fn_create.raw == NULL || fn_resize.raw == NULL || fn_close.raw == NULL) {
     win_message(TERM_NAME, "This Windows has no pseudo console (ConPTY).\n"
                            "Windows 10 version 1809 or newer is needed.");

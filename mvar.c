@@ -769,7 +769,19 @@ void var_env (Vec *out) {
     vec_push(out, xstrcat3(v->name, "=", val));
   }
   free(vars.v);
-  for (i = 0; i < passthrough.n; i++) vec_push(out, xstrdup(passthrough.v[i]));
+  for (i = 0; i < passthrough.n; i++)	/* functions go as they are now, below */
+    if (strncmp(passthrough.v[i], "BASH_FUNC_", 10) != 0)
+      vec_push(out, xstrdup(passthrough.v[i]));
+  func_env(out);
+}
+
+
+/* the BASH_FUNC_name%%=() {...} entries mmc was started with */
+void var_env_funcs (Vec *out) {
+  size_t i;
+  for (i = 0; i < passthrough.n; i++)
+    if (strncmp(passthrough.v[i], "BASH_FUNC_", 10) == 0)
+      vec_push(out, xstrdup(passthrough.v[i]));
 }
 
 

@@ -84,6 +84,14 @@ static void check_screen (T *t, const char *what, const char *want) {
 }
 
 
+/* one row of the screen as it is, not joined with the next */
+static void check_row (T *t, int y, const char *what, const char *want) {
+  char *got = grid_text(t->g, 0, y, t->g->cols - 1, y);
+  check_str(what, got, want);
+  free(got);
+}
+
+
 static void test_core (void) {
   T t;
 
@@ -198,7 +206,7 @@ static void test_core (void) {
   t_open(&t, 20, 3, 0);
   feed(&t, "\033[2;5H\033[6n\033[5n\033[c");
   check_str("DSR / DA replies", replies.s ? replies.s : "",
-            "\033[2;5R\033[0n\033[?1;2c");
+            "\033[2;5R\033[0n\033[?62;4;22c");
   feed(&t, "\033]0;title one\007\033]2;title two\033\\after");
   check_str("OSC title (ST)", last_title, "title two");
   check_screen(&t, "text after OSC", "\n    after");
@@ -223,6 +231,56 @@ static void test_core (void) {
   grid_resize(t.g, 30, 6);
   feed(&t, "\033[6;25Hend");
   check_int("bigger grid is usable", (long)t.g->screen[5].c[26].ch, 'd');
+  t_close(&t);
+
+  /* reflow: a narrower or wider window wraps the text again */
+  t_open(&t, 10, 6, 100);
+  feed(&t, "0123456789abcdef\r\nxy");
+  grid_resize(t.g, 20, 6);
+  check_row(&t, 0, "wider: the wrapped line is one again", "0123456789abcdef");
+  check_row(&t, 1, "wider: next line", "xy");
+  check_int("wider: not wrapped", t.g->screen[0].wrapped, 0);
+  check_int("wider: cursor x", t.g->cx, 2);
+  check_int("wider: cursor y", t.g->cy, 1);
+  grid_resize(t.g, 5, 6);
+  check_row(&t, 0, "narrower: row 1", "01234");
+  check_row(&t, 2, "narrower: row 3", "abcde");
+  check_row(&t, 3, "narrower: row 4", "f");
+  check_row(&t, 4, "narrower: the short line", "xy");
+  check_int("narrower: cursor y", t.g->cy, 4);
+  check_int("narrower: cursor x", t.g->cx, 2);
+  t_close(&t);
+
+  t_open(&t, 10, 4, 100);
+  feed(&t, "0123456789");	/* the cursor waits at the end of a full row */
+  grid_resize(t.g, 5, 4);
+  check_int("full row: cursor stays at its end", t.g->cx * 10 + t.g->cy, 41);
+  feed(&t, "X");
+  check_row(&t, 2, "full row: the next character goes below", "X");
+  t_close(&t);
+
+  t_open(&t, 10, 4, 100);
+  feed(&t, "abcdefgh\xe4\xb8\xad\xe6\x96\x87");	/* two wide ones */
+  grid_resize(t.g, 9, 4);
+  check_row(&t, 0, "wide: no half character at the edge", "abcdefgh");
+  check_row(&t, 1, "wide: both on the next row", "\xe4\xb8\xad\xe6\x96\x87");
+  t_close(&t);
+
+  t_open(&t, 10, 2, 100);
+  feed(&t, "aaaaaaaaaaaaaaa\r\nb\r\nc");
+  grid_resize(t.g, 20, 2);
+  check_int("scrollback reflowed", t.g->sb_len, 1);
+  {
+    char *s = grid_text(t.g, 0, -1, 19, -1);
+    check_str("scrollback: one line again", s, "aaaaaaaaaaaaaaa");
+    free(s);
+  }
+  check_screen(&t, "scrollback: screen", "b\nc");
+  feed(&t, "\033[?1049h\033[2J\033[Hfull screen app");
+  grid_resize(t.g, 5, 2);
+  feed(&t, "\033[?1049l");
+  check_row(&t, 1, "under an app: the shell screen is reflowed too", "c");
+  check_int("under an app: cursor comes back", t.g->cy, 1);
   t_close(&t);
 
   check_int("width of a", grid_wcwidth('a'), 1);
@@ -422,7 +480,13 @@ static const char *const demo =
   "\xE2\x95\x9A\xE2\x95\x90\xE2\x95\x90\xE2\x95\xA9\xE2\x95\x90\xE2\x95\x90\xE2\x95\x9D  "
   "\xE2\x94\x97\xE2\x94\x81\xE2\x94\x81\xE2\x94\xBB\xE2\x94\x81\xE2\x94\x81\xE2\x94\x9B  "
   "caf\xC3\xA9 na\xC3\xAFve \xC3\xB1 \xE2\x86\x92 \xE2\x9C\x93 \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E \xED\x95\x9C\xEA\xB8\x80\r\n"
-  "\r\n"
+  "marks: cafe\xCC\x81 nai\xCC\x88ve A\xCC\x8A n\xCC\x83  "
+  "\033]8;;https://example.com/docs\033\\a hyperlink\033]8;;\033\\  "
+  "\033]8;;https://example.com/two\033\\hovered link\033]8;;\033\\\r\n"
+  "\033[4:2mdouble\033[0m \033[4:3;58:2::255:80:80mcurly red\033[0m \033[4:4mdotted\033[0m "
+  "\033[4:5mdashed\033[0m \033[53moverline\033[0m \033[5mblink\033[0m\r\n"
+  "sixel: \033Pq#1;2;13;61;100#2;2;13;83;42#3;2;95;30;30"
+  "#1!40~-#1!40~-#2!40~-#3!40~\033\\\r\n"
   "\033[32m$\033[0m git log --oneline\r\n"
   "\033[33m7e7950d\033[0m add the terminal window\r\n"
   "\033[33m2f9bff1\033[0m the quick brown fox jumps over the lazy dog 0123456789\r\n"
@@ -469,12 +533,27 @@ static int render (const char *out, const char *theme_name, const char *font,
   s.cw = font_cell_w();
   s.ch = font_cell_h();
   s.ascent = font_ascent();
-  s.focused = s.blink_on = 1;
+  s.focused = s.blink_on = s.text_blink_on = 1;
   s.has_sel = 1;
   s.sy0 = s.sy1 = g->cy;
   s.sx0 = 7;
   s.sx1 = 19;
   s.bar_alpha = 200;
+  s.find = "find: fox\xe2\x96\x8f  1/1";
+  {	/* the mouse is on the second link */
+    int y, x;
+    for (y = 0; y < g->rows; y++)
+      for (x = 0; x < g->cols; x++)
+        if (g->screen[y].c[x].link == 2) {
+          if (!s.has_hot) {
+            s.has_hot = 1;
+            s.hx0 = x;
+            s.hy0 = y;
+          }
+          s.hx1 = x;
+          s.hy1 = y;
+        }
+  }
   m.open = 1;
   m.n = 6;
   m.label[0] = "Copy";        m.hint[0] = "Ctrl+Shift+C";
@@ -498,7 +577,268 @@ static int render (const char *out, const char *theme_name, const char *font,
 }
 
 
+/* accents and emoji sequences stay in their cell; hyperlinks; mode queries */
+static void test_clusters_links (void) {
+  T t;
+  const uint32_t *cps;
+  int n;
+  char *s;
+
+  t_open(&t, 20, 3, 10);
+  feed(&t, "e\xcc\x81x");	/* e + U+0301, then x */
+  n = grid_cps(t.g, &t.g->screen[0].c[0], &cps);
+  check_int("accent joins its letter", n, 2);
+  check_int("the letter first", (long)grid_base(t.g, &t.g->screen[0].c[0]), 'e');
+  check_int("the next letter is in the next cell", (long)t.g->screen[0].c[1].ch, 'x');
+  check_int("cursor after 2 cells", t.g->cx, 2);
+  s = grid_text(t.g, 0, 0, 19, 0);
+  check_str("copying keeps the accent", s, "e\xcc\x81x");
+  free(s);
+  feed(&t, "\r\na\xcc\x81");	/* the same cluster again: stored once */
+  check_int("same cluster, same place", (long)(t.g->screen[1].c[0].ch == t.g->screen[0].c[0].ch), 0);
+  feed(&t, "\r\ne\xcc\x81");
+  check_int("same cluster, same place", (long)(t.g->screen[2].c[0].ch == t.g->screen[0].c[0].ch), 1);
+  t_close(&t);
+
+  t_open(&t, 20, 3, 10);
+  /* man + ZWJ + laptop: one emoji, two cells */
+  feed(&t, "\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x92\xbb!");
+  check_int("ZWJ sequence: one wide cell", t.g->screen[0].c[0].attr & A_WIDE ? 1 : 0, 1);
+  check_int("ZWJ sequence: 3 code points", grid_cps(t.g, &t.g->screen[0].c[0], &cps), 3);
+  check_int("ZWJ sequence: ! right after", (long)t.g->screen[0].c[2].ch, '!');
+  /* thumbs up + skin tone */
+  feed(&t, "\xf0\x9f\x91\x8d\xf0\x9f\x8f\xbd.");
+  check_int("skin tone joins", grid_cps(t.g, &t.g->screen[0].c[3], &cps), 2);
+  check_int("skin tone: . after", (long)t.g->screen[0].c[5].ch, '.');
+  feed(&t, "\xe2\x80\x8d\r\nz");	/* a joiner, then a new line: nothing to join */
+  check_int("a joiner does not reach over a new line", (long)t.g->screen[1].c[0].ch, 'z');
+  grid_resize(t.g, 3, 3);	/* reflow keeps the clusters */
+  s = grid_text(t.g, 0, 0, 2, 0);
+  check_str("reflow keeps an emoji sequence", s, "\xf0\x9f\x91\xa8\xe2\x80\x8d\xf0\x9f\x92\xbb!");
+  free(s);
+  t_close(&t);
+
+  t_open(&t, 30, 3, 10);
+  feed(&t, "see \033]8;;https://example.com/a\033\\here\033]8;;\033\\ now");
+  check_int("OSC 8: plain text before", t.g->screen[0].c[3].link, 0);
+  check_int("OSC 8: linked text", t.g->screen[0].c[4].link != 0, 1);
+  check_str("OSC 8: the address", grid_link(t.g, t.g->screen[0].c[7].link), "https://example.com/a");
+  check_int("OSC 8: ends", t.g->screen[0].c[9].link, 0);
+  feed(&t, "\033]8;id=1;https://example.com/a\007x\033]8;;\007");
+  check_int("OSC 8: the same address again is not stored twice", t.g->nlinks, 1);
+  t_close(&t);
+
+  t_open(&t, 20, 3, 10);
+  feed(&t, "\033[?2004h\033[?2004$p\033[?1049$p\033[?4242$p\033[4$p");
+  check_str("DECRQM replies", replies.s ? replies.s : "",
+            "\033[?2004;1$y\033[?1049;2$y\033[?4242;0$y\033[4;2$y");
+  t_close(&t);
+
+  t_open(&t, 20, 3, 10);
+  feed(&t, "\033[?2026h");
+  check_int("2026: held", t.g->sync, 1);
+  feed(&t, "\033[?2026$p");
+  check_str("2026 is known", replies.s ? replies.s : "", "\033[?2026;1$y");
+  feed(&t, "\033[?2026l");
+  check_int("2026: let go", t.g->sync, 0);
+  t_close(&t);
+
+  t_open(&t, 20, 3, 10);
+  feed(&t, "\033[?25l\033[?7l\033[1;31mA\033[5;10r\033[!p");
+  check_int("DECSTR: cursor shown", t.g->cursor_on, 1);
+  check_int("DECSTR: autowrap", t.g->autowrap, 1);
+  check_int("DECSTR: plain pen", t.g->pen.attr, 0);
+  check_int("DECSTR: whole screen scrolls", t.g->bot, 2);
+  check_str("DECSTR: the text stays", t.g->screen[0].c[0].ch == 'A' ? "A" : "?", "A");
+  feed(&t, "\033[>q");
+  check_int("XTVERSION answers", replies.s != NULL && strstr(replies.s, "\033P>|" TERM_NAME) != NULL, 1);
+  t_close(&t);
+
+  t_open(&t, 20, 6, 10);	/* sixel: an image on the cells it covers */
+  {
+    const GridImage *im;
+    int tile;
+    t.g->cell_w = 10;
+    t.g->cell_h = 20;
+    feed(&t, "ab\033Pq#1;2;100;0;0#1!15~-#2;2;0;0;100!15~-!15~-!15~\033\\z");
+    im = grid_image(t.g, t.g->screen[0].c[2].ch, &tile);
+    check_int("sixel: an image cell", (t.g->screen[0].c[2].ch & CH_IMAGE) != 0, 1);
+    check_int("sixel: its size", im != NULL ? im->w * 100 + im->h : -1, 15 * 100 + 24);
+    check_int("sixel: 2 cells across, 2 rows down", (t.g->screen[1].c[3].ch & CH_IMAGE) != 0, 1);
+    check_int("sixel: the first band is red", im != NULL ? (long)im->px[0] : 0, (long)0xFFFF0000u);
+    check_int("sixel: the second band is blue", im != NULL ? (long)im->px[15 * 6] : 0, (long)0xFF0000FFu);
+    check_int("sixel: the cursor goes below it", t.g->cy * 100 + t.g->cx, 203);
+    check_row(&t, 2, "sixel: text after it", "  z");
+    feed(&t, "\033[1;1H\033[2K");
+    check_int("sixel: erased like text", (long)t.g->screen[0].c[2].ch, 0);
+    feed(&t, "\033[?2;1;0S");
+    check_str("XTSMGRAPHICS: the most pixels", replies.s ? replies.s : "", "\033[?2;0;200;120S");
+  }
+  t_close(&t);
+
+  t_open(&t, 20, 3, 10);	/* the kitty keyboard protocol: a stack of flags per screen */
+  feed(&t, "\033[?u");
+  check_str("kitty: none at first", replies.s ? replies.s : "", "\033[?0u");
+  feed(&t, "\033[>1u\033[>9u");
+  check_int("kitty: pushed", grid_kitty(t.g), 9);
+  feed(&t, "\033[<u");
+  check_int("kitty: popped", grid_kitty(t.g), 1);
+  feed(&t, "\033[=8;2u");
+  check_int("kitty: added", grid_kitty(t.g), 9);
+  feed(&t, "\033[=1;3u");
+  check_int("kitty: taken away", grid_kitty(t.g), 8);
+  feed(&t, "\033[?1049h");
+  check_int("kitty: the other screen has its own", grid_kitty(t.g), 0);
+  feed(&t, "\033[?1049l\033[<5u");
+  check_int("kitty: popping more than there is", grid_kitty(t.g), 0);
+  feed(&t, "\033[1;1Hab\033[s\033[1;1H\033[u");	/* CSI u without a prefix still restores */
+  check_int("CSI u is still restore cursor", t.g->cx, 2);
+  t_close(&t);
+
+  t_open(&t, 20, 8, 10);	/* DECOM: rows counted inside the scroll region */
+  feed(&t, "\033[3;5r\033[?6h");
+  check_int("DECOM: home is the region's top", t.g->cy, 2);
+  feed(&t, "\033[2;4H");
+  check_int("DECOM: CUP inside the region", t.g->cy * 100 + t.g->cx, 303);
+  feed(&t, "\033[9;1H");
+  check_int("DECOM: CUP stops at the region's bottom", t.g->cy, 4);
+  feed(&t, "\033[3;1H\033[6n");
+  check_str("DECOM: the cursor report counts from the region", replies.s ? replies.s : "", "\033[3;1R");
+  feed(&t, "\033[?6l");
+  check_int("DECOM off: home is the screen's top", t.g->cy, 0);
+  t_close(&t);
+
+  t_open(&t, 20, 3, 10);	/* underline styles and colors, blink, overline */
+  feed(&t, "\033[4:3;58;5;196mA\033[21mB\033[24;5;53mC\033[0mD\033[4mE\033[4:0mF");
+  check_int("curly", (t.g->screen[0].c[0].attr & A_ULSTYLE) >> UL_SHIFT, 2);
+  check_int("underline color", (long)t.g->screen[0].c[0].ul, (long)COL_IDX(196));
+  check_int("21 is double", (t.g->screen[0].c[1].attr & A_ULSTYLE) >> UL_SHIFT, 1);
+  check_int("24 ends it, 5 blinks, 53 overlines",
+            t.g->screen[0].c[2].attr & (A_UNDER | A_BLINK | A_OVER), A_BLINK | A_OVER);
+  check_int("0 resets the underline color", (long)t.g->screen[0].c[3].ul, (long)COL_DEFAULT);
+  check_int("4 is single", t.g->screen[0].c[4].attr & (A_UNDER | A_ULSTYLE), A_UNDER);
+  check_int("4:0 is none", t.g->screen[0].c[5].attr & A_UNDER, 0);
+  t_close(&t);
+}
+
+
+/* drawing only the changed rows gives the same picture as drawing it all */
+static void test_partial (void) {
+  Config c;
+  Theme th;
+  T t;
+  Frame a, b;
+  Scene s;
+  int r, same = 1;
+  size_t i;
+  config_defaults(&c);
+  if (font_init(&c) != 0) return;	/* no font here: nothing to compare */
+  font_set_px((float)c.font_size * 96.0f / 72.0f);
+  theme_apply(&th, theme_find("dark"), &c);
+  t_open(&t, 40, 8, 100);
+  feed(&t, "\033[1;32mgreen bold\033[0m plain\r\n\033[3mitalic lean\033[0m\r\n"
+           "\033[44m blue bg \033[0m and \033[4:3mcurly\033[0m\r\n$ ");
+  memset(&s, 0, sizeof(s));
+  s.g = t.g;
+  s.t = &th;
+  s.pad = 4;
+  s.strip = 3;
+  s.cw = font_cell_w();
+  s.ch = font_cell_h();
+  s.ascent = font_ascent();
+  s.focused = s.blink_on = s.text_blink_on = 1;
+  memset(&a, 0, sizeof(a));
+  memset(&b, 0, sizeof(b));
+  frame_resize(&a, 2 * s.pad + 40 * s.cw, s.strip + 2 * s.pad + 8 * s.ch);
+  frame_resize(&b, a.w, a.h);
+  draw_scene(&a, &s);
+  t.g->all_dirty = 0;
+  for (r = 0; r < t.g->rows; r++) t.g->screen[r].dirty = 0;
+  feed(&t, "ls\r\nfile.txt \033[1;34mdir/\033[0m\r\n$ ");	/* typing, output, a new prompt */
+  check_int("partial: something to draw", draw_scene_rows(&a, &s), 1);
+  draw_scene(&b, &s);
+  for (i = 0; i < (size_t)a.w * (size_t)a.h; i++)
+    if (a.px[i] != b.px[i]) same = 0;
+  check_int("partial: the same picture as a full one", same, 1);
+  t.g->all_dirty = 0;
+  for (r = 0; r < t.g->rows; r++) t.g->screen[r].dirty = 0;
+  check_int("partial: nothing changed, nothing drawn", draw_scene_rows(&a, &s), 0);
+  /* the window without the focus: a hollow cursor, after the shell's usual dance */
+  s.focused = 0;
+  draw_scene(&a, &s);
+  t.g->all_dirty = 0;
+  for (r = 0; r < t.g->rows; r++) t.g->screen[r].dirty = 0;
+  feed(&t, "\033[?25la\033[?25h");
+  draw_scene_rows(&a, &s);
+  t.g->all_dirty = 0;
+  for (r = 0; r < t.g->rows; r++) t.g->screen[r].dirty = 0;
+  feed(&t, "\033[?25l\033[1Db\033[?25h");
+  draw_scene_rows(&a, &s);
+  draw_scene(&b, &s);
+  same = 1;
+  for (i = 0; i < (size_t)a.w * (size_t)a.h; i++)
+    if (a.px[i] != b.px[i]) same = 0;
+  check_int("partial: unfocused cursor the same", same, 1);
+  frame_free(&a);
+  frame_free(&b);
+  t_close(&t);
+}
+
+
+/* ttest bench: how long a whole frame takes, and one with a changed line */
+static int bench (void) {
+  Config c;
+  Theme th;
+  Grid *g;
+  Vt vt;
+  Frame f;
+  Scene s;
+  int i, y;
+  long long t0, t1, t2;
+  config_defaults(&c);
+  if (font_init(&c) != 0) return 1;
+  font_set_px((float)c.font_size * 96.0f / 72.0f);
+  theme_apply(&th, theme_find("dark"), &c);
+  g = grid_new(120, 40, 1000);
+  vt_init(&vt, g);
+  for (y = 0; y < 40; y++) {
+    char line[200];
+    sprintf(line, "\033[3%dm%03d the quick brown fox jumps over the lazy dog "
+            "\033[1mbold\033[0m 0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFG%s",
+            y % 8, y, y < 39 ? "\r\n" : "");
+    vt_feed(&vt, line, strlen(line));
+  }
+  memset(&s, 0, sizeof(s));
+  s.g = g;
+  s.t = &th;
+  s.pad = 4;
+  s.strip = 3;
+  s.cw = font_cell_w();
+  s.ch = font_cell_h();
+  s.ascent = font_ascent();
+  s.focused = s.blink_on = s.text_blink_on = 1;
+  memset(&f, 0, sizeof(f));
+  frame_resize(&f, 2 * s.pad + g->cols * s.cw, s.strip + 2 * s.pad + g->rows * s.ch);
+  t0 = os_now_us();
+  for (i = 0; i < 200; i++) draw_scene(&f, &s);
+  t1 = os_now_us();
+  for (i = 0; i < 200; i++) {	/* the shell echoes one key: one line changes */
+    int r;
+    vt_feed(&vt, "x", 1);
+    draw_scene_rows(&f, &s);
+    g->all_dirty = 0;
+    for (r = 0; r < g->rows; r++) g->screen[r].dirty = 0;
+  }
+  t2 = os_now_us();
+  printf("full frame: %.2f ms, one changed line: %.3f ms (%dx%d cells, %dx%d px)\n",
+         (double)(t1 - t0) / 200.0 / 1000.0, (double)(t2 - t1) / 200.0 / 1000.0,
+         g->cols, g->rows, f.w, f.h);
+  return 0;
+}
+
+
 int main (int argc, char **argv) {
+  if (argc >= 2 && strcmp(argv[1], "bench") == 0) return bench();
   if (argc >= 3 && strcmp(argv[1], "replay") == 0) return replay(argv[2]);
   if (argc >= 3 && strcmp(argv[1], "render") == 0)
     return render(argv[2], argc > 3 ? argv[3] : "dark", argc > 4 ? argv[4] : NULL,
@@ -507,6 +847,8 @@ int main (int argc, char **argv) {
   test_modes();
   test_contrast();
   test_powerline();
+  test_clusters_links();
+  test_partial();
   printf("%d checks, %d failed\n", checks, failures);
   return failures ? 1 : 0;
 }

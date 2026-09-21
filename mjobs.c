@@ -2,9 +2,10 @@
 ** mjobs.c - background jobs, and the builtins about processes:
 ** jobs wait kill fg bg disown trap times umask ulimit suspend
 **
-** mmc has no job control terminal tricks (Ctrl-Z stopping a program is
-** a POSIX thing Windows does not have), so fg waits for the job in the
-** foreground and bg has nothing to resume.
+** Job control: on a POSIX terminal an interactive shell gives every job
+** a process group; Ctrl-Z stops the one in front, fg and bg let it go on.
+** Windows has no such thing for the keyboard (Ctrl-Z goes to the program
+** as a key), but kill -STOP / -CONT stop and resume a process there too.
 */
 
 #include "mmc.h"
@@ -69,6 +70,7 @@ Job *job_add (const char *cmd, OsProc *procs, long *pids, int n) {
   j->nprocs = n;
   j->running = n;
   j->pid = pids[n - 1];
+  j->pgid = pids[0];
   j->cmd = xstrdup(cmd);
   {	/* "sleep 5 &" is shown without the & */
     size_t len = strlen(j->cmd);
@@ -154,6 +156,58 @@ Job *job_find (const char *spec) {
 }
 
 
+static char job_mark (const Job *j) {
+  return j->id == cur_job ? '+' : j->id == prev_job ? '-' : ' ';
+}
+
+
+static void make_current (Job *j) {
+  if (cur_job == j->id) return;
+  prev_job = cur_job;
+  cur_job = j->id;
+}
+
+
+/* a job in the foreground was stopped (Ctrl-Z): it is kept, stopped */
+Job *job_stopped (const char *cmd, OsProc *procs, long *pids, int n, long pgid) {
+  Job *j = job_add(cmd, procs, pids, n);
+  j->stopped = 1;
+  j->notified = 1;
+  if (pgid > 0) j->pgid = pgid;
+  fd_printf(2, "\n[%d]+  Stopped                 %s\n", j->id, j->cmd);
+  return j;
+}
+
+
+int job_stopped_count (void) {
+  int i, n = 0;
+  for (i = 0; i < njobs; i++) n += jobs[i]->stopped;
+  return n;
+}
+
+
+void job_hup_stopped (void) {
+  int i, k;
+  for (i = 0; i < njobs; i++) {
+    if (!jobs[i]->stopped) continue;
+    for (k = 0; k < jobs[i]->nprocs; k++)
+      if (jobs[i]->procs[k] != 0) {
+        os_kill(jobs[i]->pids[k], 1);
+        os_kill(jobs[i]->pids[k], 18);
+      }
+  }
+}
+
+
+static void job_continue (Job *j) {
+  int k;
+  for (k = 0; k < j->nprocs; k++)
+    if (j->procs[k] != 0) os_kill(j->pids[k], 18);	/* CONT */
+  j->stopped = 0;
+  j->notified = 0;
+}
+
+
 /* collects what has finished; 'report': print "Done" lines */
 void job_poll (int report) {
   int i;
@@ -161,9 +215,19 @@ void job_poll (int report) {
     Job *j = jobs[i];
     int k;
     for (k = 0; k < j->nprocs; k++) {
-      int st;
+      int st, r;
       if (j->procs[k] == 0) continue;
-      if (os_poll_proc(j->procs[k], &st)) {
+      r = os_poll_proc(j->procs[k], &st);
+      if (r == 2) {	/* stopped in the background (it wanted the terminal) */
+        if (!j->stopped) {
+          j->stopped = 1;
+          make_current(j);
+          if (report && sh_interactive)
+            fd_printf(2, "[%d]%c  Stopped                 %s\n", j->id, job_mark(j), j->cmd);
+        }
+        continue;
+      }
+      if (r) {
         st = norm_status(st);
         j->procs[k] = 0;
         j->running--;
@@ -231,7 +295,8 @@ void job_list (int fd, int mode) {
   for (i = 0; i < njobs; i++) {
     Job *j = jobs[i];
     char mark = j->id == cur_job ? '+' : j->id == prev_job ? '-' : ' ';
-    const char *state = j->running > 0 ? "Running" : (j->status == 0 ? "Done" : "Exit");
+    const char *state = j->running > 0 ? (j->stopped ? "Stopped" : "Running") :
+                        (j->status == 0 ? "Done" : "Exit");
     if (mode == 2) fd_printf(fd, "%ld\n", j->pid);
     else if (mode == 1) fd_printf(fd, "[%d]%c %ld %-22s %s\n", j->id, mark, j->pid, state, j->cmd);
     else fd_printf(fd, "[%d]%c  %-22s %s\n", j->id, mark, state, j->cmd);
@@ -262,7 +327,8 @@ int b_jobs (int argc, char **argv, int in, int out, int err) {
         return 1;
       }
       if (mode == 2) fd_printf(out, "%ld\n", j->pid);
-      else fd_printf(out, "[%d]+  %s  %s\n", j->id, j->running ? "Running" : "Done", j->cmd);
+      else fd_printf(out, "[%d]%c  %s  %s\n", j->id, job_mark(j),
+                     j->running ? (j->stopped ? "Stopped" : "Running") : "Done", j->cmd);
     }
     return 0;
   }
@@ -382,7 +448,12 @@ int b_kill (int argc, char **argv, int in, int out, int err) {
         continue;
       }
       for (k = 0; k < j->nprocs; k++)
-        if (os_kill(j->pids[k], sig) != 0) status = 1;
+        if (j->procs[k] != 0 && os_kill(j->pids[k], sig) != 0) status = 1;
+      if (sig >= 19 && sig <= 22) {	/* STOP TSTP TTIN TTOU */
+        j->stopped = 1;
+        make_current(j);
+      }
+      else if (sig == 18) j->stopped = 0;	/* CONT */
       continue;
     }
     pid = atol(argv[i]);
@@ -412,27 +483,65 @@ int b_kill (int argc, char **argv, int in, int out, int err) {
 }
 
 
+/* fg: the job gets the terminal and goes on; we wait, unless it stops again */
 int b_fg (int argc, char **argv, int in, int out, int err) {
   Job *j = job_find(argc > 1 ? argv[1] : NULL);
+  int k, status = 0, stopped = 0;
   (void)in; (void)err;
   if (j == NULL) {
     sh_error("fg: %s: no such job", argc > 1 ? argv[1] : "current");
     return 1;
   }
   fd_printf(out, "%s\n", j->cmd);
-  return job_wait(j);
+  os_tty_give(j->pgid);
+  if (j->stopped) job_continue(j);
+  for (k = 0; k < j->nprocs; k++) {
+    int st, s = 0;
+    if (j->procs[k] == 0) continue;
+    st = norm_status(os_wait_fg(j->procs[k], &s));
+    if (s) {	/* Ctrl-Z again */
+      stopped = 1;
+      status = st;
+      break;
+    }
+    j->procs[k] = 0;
+    j->running--;
+    remember_done(j->pids[k], st);
+    if (k == j->nprocs - 1) j->status = st;
+  }
+  os_tty_give(0);
+  os_tty_fix();	/* the program may have left the terminal in any mode */
+  if (stopped) {
+    j->stopped = 1;
+    make_current(j);
+    fd_printf(2, "\n[%d]+  Stopped                 %s\n", j->id, j->cmd);
+    return status;
+  }
+  status = j->status;
+  job_remove(j);
+  return status;
 }
 
 
 int b_bg (int argc, char **argv, int in, int out, int err) {
-  Job *j = job_find(argc > 1 ? argv[1] : NULL);
+  int i, status = 0;
   (void)in; (void)err;
-  if (j == NULL) {
-    sh_error("bg: %s: no such job", argc > 1 ? argv[1] : "current");
-    return 1;
+  for (i = 1; i < argc || i == 1; i++) {
+    Job *j = job_find(i < argc ? argv[i] : NULL);
+    if (j == NULL) {
+      sh_error("bg: %s: no such job", i < argc ? argv[i] : "current");
+      status = 1;
+      continue;
+    }
+    if (!j->stopped) {
+      sh_error("bg: job %d already in background", j->id);
+      continue;
+    }
+    job_continue(j);
+    fd_printf(out, "[%d]%c %s &\n", j->id, job_mark(j), j->cmd);
+    if (i >= argc) break;
   }
-  fd_printf(out, "[%d]+ %s &\n", j->id, j->cmd);	/* it is already running */
-  return 0;
+  return status;
 }
 
 
@@ -461,10 +570,19 @@ int b_disown (int argc, char **argv, int in, int out, int err) {
 }
 
 
+/* suspend [-f]: stop this shell until its parent lets it go on */
 int b_suspend (int argc, char **argv, int in, int out, int err) {
-  (void)argc; (void)argv; (void)in; (void)out; (void)err;
-  sh_error("suspend: mmc cannot suspend itself (no job control)");
-  return 1;
+  int force = argc > 1 && strcmp(argv[1], "-f") == 0;
+  (void)in; (void)out; (void)err;
+  if (opt_get("login_shell") && !force) {
+    sh_error("suspend: cannot suspend a login shell");
+    return 1;
+  }
+  if (os_suspend_self() != 0) {
+    sh_error("suspend: not possible here (Windows cannot stop a console shell)");
+    return 1;
+  }
+  return 0;
 }
 
 

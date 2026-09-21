@@ -1,0 +1,9 @@
+got: hello
+got: world
+pid ok
+coproc ended: 0
+SHOUT
+named: 0
+via cat
+done
+status: 0

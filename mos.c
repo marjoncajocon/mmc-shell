@@ -14,6 +14,7 @@
 
 volatile int os_interrupted = 0;
 volatile int os_pending[65];
+int os_pipe_exit = 0;
 
 
 #ifdef _WIN32
@@ -376,7 +377,12 @@ long os_write (int fd, const void *buf, size_t n) {
   if (h == INVALID_HANDLE_VALUE) return -1;
   while (left > 0) {
     DWORD put = 0;
-    if (!WriteFile(h, p, (DWORD)left, &put, NULL) || put == 0) return -1;
+    if (!WriteFile(h, p, (DWORD)left, &put, NULL) || put == 0) {
+      DWORD e = GetLastError();
+      /* nobody reads the pipe any more: what SIGPIPE does elsewhere */
+      if (os_pipe_exit && (e == ERROR_NO_DATA || e == ERROR_BROKEN_PIPE)) exit(128 + 13);
+      return -1;
+    }
     p += put;
     left -= put;
   }
@@ -745,10 +751,16 @@ void os_detach (OsProc proc) {
 }
 
 
+static int proc_pause (long pid, int stop);
+
+
 int os_kill (long pid, int sig) {
-  HANDLE h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
-                         (DWORD)pid);
+  HANDLE h;
   int ok;
+  if (sig == 19 || sig == 20 || sig == 21 || sig == 22) return proc_pause(pid, 1);	/* STOP TSTP TTIN TTOU */
+  if (sig == 18) return proc_pause(pid, 0);	/* CONT */
+  if (sig == 17 || sig == 23 || sig == 28) return 0;	/* CHLD URG WINCH: nothing to do */
+  h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
   if (h == NULL) return -1;
   if (sig == 0) {	/* only asks whether it exists */
     DWORD code = 0;
@@ -766,6 +778,66 @@ int os_exec (const char *exe, char **argv, char **envp) {
   (void)exe; (void)argv; (void)envp;
   return -1;
 }
+
+/*
+** {==================================================================
+** Job control. A console has no process groups and no Ctrl-Z for us
+** (the key goes to the program as input), but a process can be stopped
+** and let go on: kill -STOP / -CONT, fg and bg use that.
+** ===================================================================
+*/
+
+typedef LONG (NTAPI *NtProcFn) (HANDLE);
+
+
+/* stop (1) or let go on (0) every thread of a process */
+static int proc_pause (long pid, int stop) {
+  static NtProcFn suspend = NULL, resume = NULL;
+  HANDLE h;
+  LONG r;
+  if (suspend == NULL) {
+    HMODULE nt = GetModuleHandleA("ntdll.dll");
+    if (nt == NULL) return -1;
+    suspend = (NtProcFn)(void (*)(void))GetProcAddress(nt, "NtSuspendProcess");
+    resume = (NtProcFn)(void (*)(void))GetProcAddress(nt, "NtResumeProcess");
+    if (suspend == NULL || resume == NULL) return -1;
+  }
+  h = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, (DWORD)pid);
+  if (h == NULL) return -1;
+  r = stop ? suspend(h) : resume(h);
+  CloseHandle(h);
+  return r >= 0 ? 0 : -1;
+}
+
+
+int os_job_control (int interactive) {
+  (void)interactive;
+  return 0;
+}
+
+int os_job_active (void) {
+  return 0;
+}
+
+void os_job_pgid (long pgid) {
+  (void)pgid;
+}
+
+void os_tty_give (long pgid) {
+  (void)pgid;
+}
+
+int os_wait_fg (OsProc proc, int *stopped) {
+  *stopped = 0;
+  return os_wait(proc);
+}
+
+int os_suspend_self (void) {
+  return -1;
+}
+
+/* }================================================================== */
+
 
 
 int os_can_exec_replace (void) {
@@ -818,7 +890,6 @@ void os_thread_join (OsThread *t) {
   free(t);
 }
 
-/* }================================================================== */
 
 #else
 
@@ -842,6 +913,11 @@ void os_thread_join (OsThread *t) {
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+
+/* job control, see below */
+static int g_jobctl;
+static pid_t g_orig_pgrp, g_shell_pgrp;
+static long g_spawn_pgid;
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -881,6 +957,7 @@ void os_init (void) {
 
 void os_shutdown (void) {
   os_tty_fix();
+  if (g_jobctl && g_orig_pgrp > 0) tcsetpgrp(0, g_orig_pgrp);	/* the terminal goes back */
 }
 
 
@@ -1254,6 +1331,8 @@ int os_spawn (const char *exe, char **argv, char **envp, const int *fds,
   }
   if (p == 0) {	/* child */
     int tmp[MMC_FDS], k;
+    if (g_spawn_pgid >= 0) setpgid(0, (pid_t)g_spawn_pgid);
+    signal(SIGTTIN, SIG_DFL);
     signal(SIGINT, SIG_DFL);
     signal(SIGQUIT, SIG_DFL);
     signal(SIGTSTP, SIG_DFL);
@@ -1272,6 +1351,7 @@ int os_spawn (const char *exe, char **argv, char **envp, const int *fds,
     fd_printf(2, "mmc: %s: cannot execute: %s\n", argv[0], strerror(errno));
     _exit(errno == ENOENT ? 127 : 126);
   }
+  if (g_spawn_pgid >= 0) setpgid(p, g_spawn_pgid > 0 ? (pid_t)g_spawn_pgid : p);
   *proc = (OsProc)p;
   *pid = (long)p;
   return 0;
@@ -1306,8 +1386,12 @@ int os_wait (OsProc proc) {
 
 int os_poll_proc (OsProc proc, int *status) {
   int st = 0;
-  pid_t r = waitpid((pid_t)proc, &st, WNOHANG);
+  pid_t r = waitpid((pid_t)proc, &st, WNOHANG | WUNTRACED);
   if (r <= 0) return r < 0 ? (*status = 127, 1) : 0;
+  if (WIFSTOPPED(st)) {	/* a background job wanted the terminal, or kill -STOP */
+    *status = 128 + WSTOPSIG(st);
+    return 2;
+  }
   *status = decode(st);
   return 1;
 }
@@ -1318,9 +1402,106 @@ void os_detach (OsProc proc) {
 }
 
 
-int os_kill (long pid, int sig) {
-  return kill((pid_t)pid, sig);
+/* the shell speaks Linux signal numbers (kill -l); macOS has others */
+static int native_sig (int sig) {
+  switch (sig) {
+    case 7: return SIGBUS;
+    case 10: return SIGUSR1;
+    case 12: return SIGUSR2;
+    case 17: return SIGCHLD;
+    case 18: return SIGCONT;
+    case 19: return SIGSTOP;
+    case 20: return SIGTSTP;
+    case 21: return SIGTTIN;
+    case 22: return SIGTTOU;
+    case 23: return SIGURG;
+    case 28: return SIGWINCH;
+    default: return sig;
+  }
 }
+
+
+int os_kill (long pid, int sig) {
+  return kill((pid_t)pid, native_sig(sig));
+}
+
+/*
+** {==================================================================
+** Job control: an interactive shell on a terminal has a process group
+** of its own; every job gets one too, and the terminal while it runs in
+** the foreground. Ctrl-Z stops it; fg and bg let it go on.
+** ===================================================================
+*/
+
+static int g_jobctl = 0;
+static pid_t g_orig_pgrp = -1, g_shell_pgrp = -1;
+static long g_spawn_pgid = -1;	/* -1: children stay in our group */
+
+
+int os_job_control (int interactive) {
+  int tries;
+  if (!interactive) {	/* a script stops on Ctrl-Z like any other program */
+    signal(SIGTSTP, SIG_DFL);
+    return 0;
+  }
+  if (!isatty(0)) return 0;
+  for (tries = 0; tries < 20 && tcgetpgrp(0) != getpgrp(); tries++)
+    kill(-getpgrp(), SIGTTIN);	/* started in the background: wait to be in front */
+  if (tcgetpgrp(0) != getpgrp()) return 0;
+  signal(SIGTTIN, SIG_IGN);
+  g_orig_pgrp = getpgrp();
+  if (getsid(0) != getpid()) setpgid(0, 0);	/* a group of our own */
+  g_shell_pgrp = getpgrp();
+  if (tcsetpgrp(0, g_shell_pgrp) != 0) return 0;
+  g_jobctl = 1;
+  return 1;
+}
+
+
+int os_job_active (void) {
+  return g_jobctl;
+}
+
+
+void os_job_pgid (long pgid) {
+  g_spawn_pgid = g_jobctl ? pgid : -1;
+}
+
+
+void os_tty_give (long pgid) {
+  if (g_jobctl) tcsetpgrp(0, pgid > 0 ? (pid_t)pgid : g_shell_pgrp);
+}
+
+
+int os_wait_fg (OsProc proc, int *stopped) {
+  int st = 0;
+  *stopped = 0;
+  for (;;) {
+    pid_t r = waitpid((pid_t)proc, &st, WUNTRACED);
+    if (r < 0 && errno == EINTR) continue;
+    if (r < 0) return 1;
+    if (WIFSTOPPED(st)) {
+      if (g_jobctl) {	/* Ctrl-Z: it becomes a stopped job */
+        *stopped = 1;
+        return 128 + WSTOPSIG(st);
+      }
+      kill((pid_t)proc, SIGCONT);	/* no job control: it must not hang us */
+      continue;
+    }
+    break;
+  }
+  return decode(st);
+}
+
+
+int os_suspend_self (void) {
+  kill(getpid(), SIGSTOP);	/* whoever started us gets the terminal back */
+  if (g_jobctl) tcsetpgrp(0, g_shell_pgrp);	/* and we take it again */
+  return 0;
+}
+
+/* }================================================================== */
+
 
 
 int os_exec (const char *exe, char **argv, char **envp) {
@@ -1387,6 +1568,117 @@ void os_thread_join (OsThread *t) {
   pthread_join(t->t, NULL);
   free(t);
 }
+
+
+/*
+** {==================================================================
+** Named pipes for <( ) and >( ): a FIFO in the temporary folder; a
+** thread of ours copies between it and an ordinary pipe the other
+** command has, so the data streams as it is made
+** ===================================================================
+*/
+
+struct OsNPipe {
+  char *path;
+  int fd;	/* our end of the ordinary pipe */
+  int to_reader;	/* 1: fd -> the program that opens it; 0: the other way */
+  volatile int connected;
+  int refs;
+  pthread_mutex_t mu;
+  OsThread *th;
+};
+
+
+static void npipe_unref (OsNPipe *np) {
+  int left;
+  pthread_mutex_lock(&np->mu);
+  left = --np->refs;
+  pthread_mutex_unlock(&np->mu);
+  if (left > 0) return;
+  unlink(np->path);
+  free(np->path);
+  pthread_mutex_destroy(&np->mu);
+  free(np);
+}
+
+
+static void npipe_relay (void *arg) {
+  OsNPipe *np = (OsNPipe *)arg;
+  char buf[16384];
+  int f = open(np->path, np->to_reader ? O_WRONLY : O_RDONLY);	/* waits for the program */
+  np->connected = 1;
+  if (f >= 0) {
+    for (;;) {
+      int from = np->to_reader ? np->fd : f, to = np->to_reader ? f : np->fd;
+      ssize_t got = read(from, buf, sizeof(buf)), off = 0;
+      if (got < 0 && errno == EINTR) continue;
+      if (got <= 0) break;
+      while (off < got) {
+        ssize_t put = write(to, buf + off, (size_t)(got - off));
+        if (put < 0 && errno == EINTR) continue;
+        if (put <= 0) break;
+        off += put;
+      }
+      if (off < got) break;	/* the other side went away (SIGPIPE is ignored) */
+    }
+    close(f);
+  }
+  close(np->fd);
+  npipe_unref(np);
+}
+
+
+OsNPipe *os_npipe_new (const char *dir, int fd, int to_reader, char **path) {
+  static int counter = 0;
+  char name[64];
+  OsNPipe *np = (OsNPipe *)xmalloc(sizeof(OsNPipe));
+  memset(np, 0, sizeof(*np));
+  sprintf(name, "mmc-ps-%ld-%d", (long)getpid(), ++counter);
+  np->path = path_join(dir, name);
+  unlink(np->path);
+  if (mkfifo(np->path, 0600) != 0) {
+    free(np->path);
+    free(np);
+    return NULL;
+  }
+  np->fd = fd;
+  np->to_reader = to_reader;
+  np->refs = 2;	/* the thread and the caller */
+  pthread_mutex_init(&np->mu, NULL);
+  np->th = os_thread_start(npipe_relay, np);
+  if (np->th == NULL) {
+    unlink(np->path);
+    free(np->path);
+    pthread_mutex_destroy(&np->mu);
+    free(np);
+    return NULL;
+  }
+  *path = xstrdup(np->path);
+  return np;
+}
+
+
+/* the command is done. Nobody opened it: we do, so the thread ends. The
+** data for a >( ) reader is all through when this returns. */
+void os_npipe_end (OsNPipe *np) {
+  int tries;
+  for (tries = 0; !np->connected && tries < 200; tries++) {
+    int f = open(np->path, (np->to_reader ? O_RDONLY : O_WRONLY) | O_NONBLOCK);
+    if (f >= 0) {
+      close(f);
+      break;
+    }
+    usleep(5000);	/* the thread is not in its open() yet */
+  }
+  if (np->to_reader) {	/* a <( ) writer may go on for ever: let it */
+    pthread_detach(np->th->t);
+    free(np->th);
+  }
+  else os_thread_join(np->th);
+  npipe_unref(np);
+}
+
+/* }================================================================== */
 
 /* }================================================================== */
 
