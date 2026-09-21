@@ -1,10 +1,10 @@
 /*
-** tpty.c - pseudo terminal of mmc-term
+** tpty.c - pseudo terminals of mmc-term
 **
-** Starts the shell "behind" the window: whatever the window writes is
+** Starts a shell "behind" the window: whatever the window writes is
 ** the keyboard of the shell, whatever the shell prints comes back as
-** bytes for tvt.c. Windows uses ConPTY (Windows 10 1809 or newer),
-** Linux and macOS use a classic pty.
+** bytes for tvt.c. Every tab has its own Pty. Windows uses ConPTY
+** (Windows 10 1809 or newer), Linux and macOS use a classic pty.
 */
 
 #include "mterm.h"
@@ -45,13 +45,18 @@ typedef union FnPtr {
 } FnPtr;
 
 static FnPtr fn_create, fn_resize, fn_close;
-static void *pcon = NULL;
-static HANDLE in_write = NULL, out_read = NULL, process = NULL;
-static CRITICAL_SECTION lock;
-static Buf queue;
-static size_t queue_pos = 0;
-static volatile LONG closed = 0, exited = 0;
-static DWORD exit_code = 0;
+
+/* the tab, the reader thread and the waiter thread each hold a
+** reference: the last one to let go frees it */
+struct Pty {
+  void *pcon;
+  HANDLE in_write, out_read, process;
+  CRITICAL_SECTION lock;
+  Buf queue;
+  size_t queue_pos;
+  volatile LONG closed, exited, refs;
+  DWORD exit_code;
+};
 
 
 static void quote_arg (Buf *b, const char *a) {
@@ -93,44 +98,58 @@ static wchar_t *widen (const char *s) {
 }
 
 
+static void pty_unref (Pty *p) {
+  if (InterlockedDecrement(&p->refs) != 0) return;
+  CloseHandle(p->out_read);
+  CloseHandle(p->process);
+  DeleteCriticalSection(&p->lock);
+  buf_free(&p->queue);
+  free(p);
+}
+
+
 static DWORD WINAPI reader_thread (LPVOID arg) {
+  Pty *p = (Pty *)arg;
   char buf[16384];
   DWORD n;
-  (void)arg;
-  while (ReadFile(out_read, buf, sizeof(buf), &n, NULL) && n > 0) {
+  while (ReadFile(p->out_read, buf, sizeof(buf), &n, NULL) && n > 0) {
     size_t pending;
-    EnterCriticalSection(&lock);
-    buf_putn(&queue, buf, n);
-    pending = queue.len - queue_pos;
-    LeaveCriticalSection(&lock);
+    EnterCriticalSection(&p->lock);
+    buf_putn(&p->queue, buf, n);
+    pending = p->queue.len - p->queue_pos;
+    LeaveCriticalSection(&p->lock);
     win_wake();
-    while (pending > ((size_t)4 << 20) && !closed) {	/* window is behind */
+    while (pending > ((size_t)4 << 20) && !p->closed) {	/* window is behind */
       Sleep(2);
-      EnterCriticalSection(&lock);
-      pending = queue.len - queue_pos;
-      LeaveCriticalSection(&lock);
+      EnterCriticalSection(&p->lock);
+      pending = p->queue.len - p->queue_pos;
+      LeaveCriticalSection(&p->lock);
     }
   }
-  InterlockedExchange(&closed, 1);
+  InterlockedExchange(&p->closed, 1);
   win_wake();
+  pty_unref(p);
   return 0;
 }
 
 
 static DWORD WINAPI waiter_thread (LPVOID arg) {
-  (void)arg;
-  WaitForSingleObject(process, INFINITE);
-  GetExitCodeProcess(process, &exit_code);
+  Pty *p = (Pty *)arg;
+  DWORD code = 0;
+  WaitForSingleObject(p->process, INFINITE);
+  GetExitCodeProcess(p->process, &code);
+  p->exit_code = code;
   Sleep(60);	/* let the last output arrive */
-  InterlockedExchange(&exited, 1);
+  InterlockedExchange(&p->exited, 1);
   win_wake();
+  pty_unref(p);
   return 0;
 }
 
 
-int pty_spawn (const char *exe, char **argv, int cols, int rows) {
+Pty *pty_spawn (const char *exe, char **argv, int cols, int rows) {
   HMODULE k32 = GetModuleHandleA("kernel32.dll");
-  HANDLE in_read = NULL, out_write = NULL;
+  HANDLE in_read = NULL, in_write = NULL, out_read = NULL, out_write = NULL;
   HANDLE old_in, old_out, old_err;
   STARTUPINFOEXW si;
   PROCESS_INFORMATION pi;
@@ -138,6 +157,8 @@ int pty_spawn (const char *exe, char **argv, int cols, int rows) {
   COORD size;
   Buf cl;
   wchar_t *wexe, *wcl;
+  void *pcon = NULL;
+  Pty *p;
   int i, ok;
   fn_create.raw = GetProcAddress(k32, "CreatePseudoConsole");
   fn_resize.raw = GetProcAddress(k32, "ResizePseudoConsole");
@@ -145,14 +166,23 @@ int pty_spawn (const char *exe, char **argv, int cols, int rows) {
   if (fn_create.raw == NULL || fn_resize.raw == NULL || fn_close.raw == NULL) {
     win_message(TERM_NAME, "This Windows has no pseudo console (ConPTY).\n"
                            "Windows 10 version 1809 or newer is needed.");
-    return -1;
+    return NULL;
   }
-  if (!CreatePipe(&in_read, &in_write, NULL, 0) ||
-      !CreatePipe(&out_read, &out_write, NULL, 0))
-    return -1;
+  if (!CreatePipe(&in_read, &in_write, NULL, 0)) return NULL;
+  if (!CreatePipe(&out_read, &out_write, NULL, 0)) {
+    CloseHandle(in_read);
+    CloseHandle(in_write);
+    return NULL;
+  }
   size.X = (SHORT)cols;
   size.Y = (SHORT)rows;
-  if (fn_create.create(size, in_read, out_write, 0, &pcon) != S_OK) return -1;
+  if (fn_create.create(size, in_read, out_write, 0, &pcon) != S_OK) {
+    CloseHandle(in_read);
+    CloseHandle(in_write);
+    CloseHandle(out_read);
+    CloseHandle(out_write);
+    return NULL;
+  }
   memset(&si, 0, sizeof(si));
   memset(&pi, 0, sizeof(pi));
   si.StartupInfo.cb = sizeof(si);
@@ -191,79 +221,86 @@ int pty_spawn (const char *exe, char **argv, int cols, int rows) {
   buf_free(&cl);
   CloseHandle(in_read);
   CloseHandle(out_write);
-  if (!ok) return -1;
+  if (!ok) {
+    fn_close.close(pcon);
+    CloseHandle(in_write);
+    CloseHandle(out_read);
+    return NULL;
+  }
   CloseHandle(pi.hThread);
-  process = pi.hProcess;
-  InitializeCriticalSection(&lock);
-  buf_init(&queue);
-  CloseHandle(CreateThread(NULL, 0, reader_thread, NULL, 0, NULL));
-  CloseHandle(CreateThread(NULL, 0, waiter_thread, NULL, 0, NULL));
-  return 0;
+  p = (Pty *)xmalloc(sizeof(Pty));
+  memset(p, 0, sizeof(*p));
+  p->pcon = pcon;
+  p->in_write = in_write;
+  p->out_read = out_read;
+  p->process = pi.hProcess;
+  p->refs = 3;
+  InitializeCriticalSection(&p->lock);
+  buf_init(&p->queue);
+  CloseHandle(CreateThread(NULL, 0, reader_thread, p, 0, NULL));
+  CloseHandle(CreateThread(NULL, 0, waiter_thread, p, 0, NULL));
+  return p;
 }
 
 
-void pty_write (const char *s, size_t n) {
-  while (n > 0 && in_write != NULL) {
+void pty_write (Pty *p, const char *s, size_t n) {
+  while (n > 0 && p->in_write != NULL) {
     DWORD put = 0;
-    if (!WriteFile(in_write, s, (DWORD)n, &put, NULL) || put == 0) return;
+    if (!WriteFile(p->in_write, s, (DWORD)n, &put, NULL) || put == 0) return;
     s += put;
     n -= put;
   }
 }
 
 
-void pty_resize (int cols, int rows) {
+void pty_resize (Pty *p, int cols, int rows) {
   COORD size;
-  if (pcon == NULL) return;
+  if (p->pcon == NULL) return;
   size.X = (SHORT)cols;
   size.Y = (SHORT)rows;
-  fn_resize.resize(pcon, size);
+  fn_resize.resize(p->pcon, size);
 }
 
 
-long pty_read (char *buf, size_t n) {
+long pty_read (Pty *p, char *buf, size_t n) {
   size_t have;
-  if (process == NULL) return -1;
-  EnterCriticalSection(&lock);
-  have = queue.len - queue_pos;
+  EnterCriticalSection(&p->lock);
+  have = p->queue.len - p->queue_pos;
   if (have > n) have = n;
   if (have > 0) {
-    memcpy(buf, queue.s + queue_pos, have);
-    queue_pos += have;
-    if (queue_pos == queue.len) {	/* all read: start over */
-      queue.len = 0;
-      queue_pos = 0;
+    memcpy(buf, p->queue.s + p->queue_pos, have);
+    p->queue_pos += have;
+    if (p->queue_pos == p->queue.len) {	/* all read: start over */
+      p->queue.len = 0;
+      p->queue_pos = 0;
     }
   }
-  LeaveCriticalSection(&lock);
-  if (have == 0 && closed) return -1;
+  LeaveCriticalSection(&p->lock);
+  if (have == 0 && p->closed) return -1;
   return (long)have;
 }
 
 
-int pty_fd (void) {
+int pty_fd (Pty *p) {
+  (void)p;
   return -1;
 }
 
 
-int pty_exited (int *code) {
-  if (!exited) return 0;
-  if (code) *code = (int)exit_code;
+int pty_exited (Pty *p, int *code) {
+  if (!p->exited) return 0;
+  if (code) *code = (int)p->exit_code;
   return 1;
 }
 
 
-void pty_close (void) {
-  if (pcon != NULL) {
-    void *p = pcon;
-    pcon = NULL;
-    InterlockedExchange(&closed, 1);
-    fn_close.close(p);	/* ends the shell if it is still there */
-  }
-  if (in_write != NULL) {
-    CloseHandle(in_write);
-    in_write = NULL;
-  }
+void pty_close (Pty *p) {
+  InterlockedExchange(&p->closed, 1);
+  fn_close.close(p->pcon);	/* ends the shell if it is still there */
+  p->pcon = NULL;
+  CloseHandle(p->in_write);
+  p->in_write = NULL;
+  pty_unref(p);	/* the threads end on their own and let go as well */
 }
 
 /* }================================================================== */
@@ -285,9 +322,25 @@ void pty_close (void) {
 #include <termios.h>
 #include <unistd.h>
 
-static int master = -1;
-static pid_t child = -1;
-static int child_status = 0, child_done = 0;
+struct Pty {
+  int master;
+  pid_t child;
+  int status, done;
+};
+
+/* shells of closed tabs that had not ended yet: waited for later */
+#define ORPHAN_MAX	64
+static pid_t orphans[ORPHAN_MAX];
+static int norphans = 0;
+
+
+static void reap_orphans (void) {
+  int i = 0;
+  while (i < norphans) {
+    if (waitpid(orphans[i], NULL, WNOHANG) != 0) orphans[i] = orphans[--norphans];
+    else i++;
+  }
+}
 
 
 static void set_size (int fd, int cols, int rows) {
@@ -299,19 +352,23 @@ static void set_size (int fd, int cols, int rows) {
 }
 
 
-int pty_spawn (const char *exe, char **argv, int cols, int rows) {
+Pty *pty_spawn (const char *exe, char **argv, int cols, int rows) {
   const char *slave_name;
-  master = posix_openpt(O_RDWR | O_NOCTTY);
-  if (master < 0) return -1;
+  pid_t child;
+  Pty *p;
+  int master = posix_openpt(O_RDWR | O_NOCTTY);
+  if (master < 0) return NULL;
   if (grantpt(master) != 0 || unlockpt(master) != 0 ||
       (slave_name = ptsname(master)) == NULL) {
     close(master);
-    master = -1;
-    return -1;
+    return NULL;
   }
   set_size(master, cols, rows);
   child = fork();
-  if (child < 0) return -1;
+  if (child < 0) {
+    close(master);
+    return NULL;
+  }
   if (child == 0) {
     int slave;
     setsid();	/* new session: the pty becomes the controlling terminal */
@@ -335,65 +392,70 @@ int pty_spawn (const char *exe, char **argv, int cols, int rows) {
   }
   fcntl(master, F_SETFL, fcntl(master, F_GETFL) | O_NONBLOCK);
   fcntl(master, F_SETFD, FD_CLOEXEC);
-  return 0;
+  p = (Pty *)xmalloc(sizeof(Pty));
+  memset(p, 0, sizeof(*p));
+  p->master = master;
+  p->child = child;
+  return p;
 }
 
 
-void pty_write (const char *s, size_t n) {
-  while (n > 0 && master >= 0) {
-    ssize_t r = write(master, s, n);
+void pty_write (Pty *p, const char *s, size_t n) {
+  while (n > 0 && p->master >= 0) {
+    ssize_t r = write(p->master, s, n);
     if (r > 0) {
       s += r;
       n -= (size_t)r;
     }
     else if (r < 0 && (errno == EAGAIN || errno == EINTR)) {
-      struct pollfd p;	/* the shell is busy: wait until it takes more */
-      p.fd = master;
-      p.events = POLLOUT;
-      p.revents = 0;
-      poll(&p, 1, 100);
+      struct pollfd pf;	/* the shell is busy: wait until it takes more */
+      pf.fd = p->master;
+      pf.events = POLLOUT;
+      pf.revents = 0;
+      poll(&pf, 1, 100);
     }
     else return;
   }
 }
 
 
-void pty_resize (int cols, int rows) {
-  if (master >= 0) set_size(master, cols, rows);
+void pty_resize (Pty *p, int cols, int rows) {
+  if (p->master >= 0) set_size(p->master, cols, rows);
 }
 
 
-long pty_read (char *buf, size_t n) {
+long pty_read (Pty *p, char *buf, size_t n) {
   ssize_t r;
-  if (master < 0) return -1;
-  r = read(master, buf, n);
+  if (p->master < 0) return -1;
+  r = read(p->master, buf, n);
   if (r > 0) return (long)r;
   if (r < 0 && (errno == EAGAIN || errno == EINTR)) return 0;
   return -1;	/* 0 or EIO: the shell side is closed */
 }
 
 
-int pty_fd (void) {
-  return master;
+int pty_fd (Pty *p) {
+  return p->master;
 }
 
 
-int pty_exited (int *code) {
-  if (!child_done && child > 0 && waitpid(child, &child_status, WNOHANG) == child)
-    child_done = 1;
-  if (!child_done) return 0;
+int pty_exited (Pty *p, int *code) {
+  reap_orphans();
+  if (!p->done && waitpid(p->child, &p->status, WNOHANG) == p->child) p->done = 1;
+  if (!p->done) return 0;
   if (code)
-    *code = WIFEXITED(child_status) ? WEXITSTATUS(child_status)
-                                    : 128 + WTERMSIG(child_status);
+    *code = WIFEXITED(p->status) ? WEXITSTATUS(p->status) : 128 + WTERMSIG(p->status);
   return 1;
 }
 
 
-void pty_close (void) {
-  if (master >= 0) {
-    close(master);	/* the shell gets a hangup */
-    master = -1;
+void pty_close (Pty *p) {
+  if (p->master >= 0) close(p->master);	/* the shell gets a hangup */
+  if (!p->done && waitpid(p->child, NULL, WNOHANG) == 0) {
+    kill(-p->child, SIGHUP);	/* its whole session: the jobs of the tab too */
+    if (norphans < ORPHAN_MAX) orphans[norphans++] = p->child;
   }
+  free(p);
 }
 
 /* }================================================================== */

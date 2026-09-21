@@ -494,8 +494,9 @@ int win_run (void) {
   X.XMapWindow(dpy, win);
   app_on_resize(win_w, win_h);
   while (!quit) {
-    struct pollfd fds[2];
-    int n = 1;
+    struct pollfd fds[1 + TAB_MAX];
+    int ptys[TAB_MAX];
+    int n = 1, i, np, ready = 0;
     while (X.XPending(dpy) > 0) {
       X.XNextEvent(dpy, &e);
       if (X.XFilterEvent(&e, 0)) continue;	/* the input method took it */
@@ -509,18 +510,21 @@ int win_run (void) {
     fds[0].fd = X.XConnectionNumber(dpy);
     fds[0].events = POLLIN;
     fds[0].revents = 0;
-    if (pty_fd() >= 0) {
-      fds[1].fd = pty_fd();
-      fds[1].events = POLLIN;
-      fds[1].revents = 0;
-      n = 2;
+    np = app_fds(ptys, TAB_MAX);	/* one pty per tab */
+    for (i = 0; i < np; i++) {
+      fds[n].fd = ptys[i];
+      fds[n].events = POLLIN;
+      fds[n].revents = 0;
+      n++;
     }
     if (woken) woken = 0;
     else poll(fds, (nfds_t)n, 30);
     app_on_tick(win_ticks());
-    if (n == 2 && (fds[1].revents & (POLLIN | POLLHUP | POLLERR))) app_on_wake();
+    for (i = 1; i < n; i++)
+      if (fds[i].revents & (POLLIN | POLLHUP | POLLERR)) ready = 1;
+    if (ready) app_on_wake();
   }
-  pty_close();
+  app_close_all();
   return app_exit_code();
 }
 

@@ -97,7 +97,7 @@ static const char *const default_config =
   "# mmcterm.conf - settings of the mmc-term window\n"
   "# Remove the '#' in front of a line to change it.\n"
   "\n"
-  "theme=dark                # dark or light (Ctrl+Shift+T switches)\n"
+  "theme=dark                # dark or light (Ctrl+Shift+L switches)\n"
   "#font=Hack                # Hack (Hack Nerd Font Mono, comes with mmc: has the\n"
   "                          # Powerline and Nerd icons), Cascadia Mono, Consolas ...\n"
   "#font_file=/usr/share/fonts/MyFont.ttf   # or any .ttf file\n"

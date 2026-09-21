@@ -135,11 +135,24 @@ mmc-term --render-test a.bmp draw a sample into an image, no window
 | drag, double click, triple click | select text, a word, a line — selecting copies |
 | wheel, Shift+PgUp / PgDn | scroll back (10 000 lines); Ctrl+Shift+Home / End: top / bottom |
 | Ctrl + / Ctrl - / Ctrl 0, Ctrl+wheel | bigger, smaller, normal text |
-| Ctrl+Shift+T | switch between the dark and the light theme (remembered) |
+| Ctrl+Shift+T / Ctrl+Shift+W | new tab / close tab (closing the last one closes the window) |
+| Ctrl+Tab / Ctrl+Shift+Tab | next / previous tab (also: click a tab, or the wheel over the tabs) |
+| Ctrl+Shift+L | switch between the dark and the light theme (remembered) |
 | Ctrl+Shift+wheel | see-through window: opacity 30 .. 100 % in steps of 5 (remembered; also in the menu) |
 | F11 or Alt+Enter | full screen |
 | Ctrl+Shift+N | new window |
 | right click | menu |
+
+**Tabs.** Every tab is its own shell, started in the folder of the tab you
+are in. The tab bar shows up with the second tab — the window grows by its
+height, so no shell loses a line — and goes away again with the last but
+one. A tab shows the title its program set, or the name you give it: double
+click the tab (or *Rename tab* in the menu), type, Enter keeps it, Esc drops
+it, and an empty name gives the program's title back. Your name stays when the
+shell changes its title, and it is also the window title. The `x` (or a middle click)
+closes it, `+` opens one, and a green dot says that a tab you are not looking
+at printed something. When the program of a tab ends (`exit`), the tab
+closes; with `--hold` the first tab stays to show how it ended.
 
 On Windows mmc-term draws its own title bar: the logo, the title, and three
 round buttons — yellow hides, green zooms (maximizes), red closes; a sign
@@ -148,7 +161,8 @@ window, a double click zooms it, the edges still resize, and snapping to the
 screen sides works as usual. `titlebar=native` in `mmcterm.conf` gives the
 system title bar back. (Linux and macOS keep the system title bar for now.)
 
-On a Mac the Command key does it: Cmd+C, Cmd+V, Cmd+N, Cmd+T, Cmd +/-.
+On a Mac the Command key does it: Cmd+C, Cmd+V, Cmd+N, Cmd+T (new tab),
+Cmd+W (close tab), Cmd+L (theme), Cmd +/-.
 
 Settings are in `/etc/mmcterm.conf` of the mmc folder (written on the first
 start, every line is explained there): `theme`, `font`, `font_file`,
@@ -185,7 +199,7 @@ from Windows without any SDK.
 
 | System | State |
 |---|---|
-| Windows 10 1809+ / 11 | **tested**: typing, history, Tab, Ctrl-C, resize, scrollback, selection and clipboard, menu, themes, nvim, large outputs |
+| Windows 10 1809+ / 11 | **tested**: typing, history, Tab, Ctrl-C, resize, scrollback, selection and clipboard, menu, themes, tabs, nvim, large outputs |
 | Linux (X11, or Wayland through XWayland) | **experimental**: compiles and links for x86_64 and aarch64, shares the tested core, but the X11 backend (`tx11.c`) has not been run yet |
 | macOS | **untested**: compiles and links for x86_64 and aarch64; the Cocoa backend (`tcocoa.c`) has never been run |
 
@@ -206,10 +220,11 @@ Programs can also ask the window things: `OSC 10/11/12` for the text,
 background and cursor color (nvim reads them to pick its theme, and setting
 them works too), `OSC 4` for a palette color, `OSC 52` to put something in
 the clipboard, and `OSC 7`, with which the shell says where it is, so
-Ctrl+Shift+N opens the new window in the same folder.
+Ctrl+Shift+N opens the new window (and Ctrl+Shift+T the new tab) in the same
+folder.
 
-Not there (yet): tabs, re-wrapping text on resize, color emoji, ligatures,
-search, clickable links.
+Not there (yet): re-wrapping text on resize, color emoji, ligatures, search,
+clickable links, moving tabs by dragging.
 
 ## Settings
 

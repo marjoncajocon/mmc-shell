@@ -467,7 +467,7 @@ static int render (const char *out, const char *theme_name, const char *font) {
   m.label[0] = "Copy";        m.hint[0] = "Ctrl+Shift+C";
   m.label[1] = "Paste";       m.hint[1] = "Ctrl+Shift+V";
   m.label[2] = NULL;
-  m.label[3] = "Light theme"; m.hint[3] = "Ctrl+Shift+T";
+  m.label[3] = "Light theme"; m.hint[3] = "Ctrl+Shift+L";
   m.label[4] = "New window";  m.hint[4] = "Ctrl+Shift+N";
   m.label[5] = "About mmc-term";
   m.hot = 3;

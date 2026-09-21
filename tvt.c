@@ -15,15 +15,11 @@
 enum { S_GROUND, S_ESC, S_ESC_SKIP, S_CHARSET, S_CSI, S_OSC, S_OSC_ESC,
        S_STRING, S_STRING_ESC };
 
-/* line drawing state lives with the parser: G0/G1 and which is active */
-static int vt_g[2], vt_gl;
-
 
 void vt_init (Vt *vt, Grid *g) {
   memset(vt, 0, sizeof(*vt));
   vt->g = g;
   buf_init(&vt->osc);
-  vt_g[0] = vt_g[1] = vt_gl = 0;
 }
 
 
@@ -50,7 +46,7 @@ static uint32_t line_drawing (uint32_t c) {
 
 
 static void print (Vt *vt, uint32_t cp) {
-  if (vt_g[vt_gl]) cp = line_drawing(cp);
+  if (vt->charset[vt->gl]) cp = line_drawing(cp);
   vt->last = cp;
   grid_putc(vt->g, cp);
 }
@@ -64,8 +60,8 @@ static void control (Vt *vt, int c) {
     case 0x09: grid_tab(g, 1); break;
     case 0x0A: case 0x0B: case 0x0C: grid_lf(g); break;
     case 0x0D: grid_cr(g); break;
-    case 0x0E: vt_gl = 1; break;
-    case 0x0F: vt_gl = 0; break;
+    case 0x0E: vt->gl = 1; break;
+    case 0x0F: vt->gl = 0; break;
     default: break;
   }
 }
@@ -310,7 +306,7 @@ static void escape (Vt *vt, int c) {
     case 'M': grid_ri(g); break;
     case 'c':
       grid_reset(g);
-      vt_g[0] = vt_g[1] = vt_gl = 0;
+      vt->charset[0] = vt->charset[1] = vt->gl = 0;
       break;
     default: break;	/* = > \ and the rest: nothing to do */
   }
@@ -402,7 +398,7 @@ void vt_feed (Vt *vt, const char *buf, size_t n) {
       case S_ESC: escape(vt, c); break;
       case S_ESC_SKIP: vt->state = S_GROUND; break;
       case S_CHARSET:
-        vt_g[vt->inter == ')'] = (c == '0');
+        vt->charset[vt->inter == ')'] = (c == '0');
         vt->state = S_GROUND;
         break;
       case S_CSI: csi_byte(vt, c); break;

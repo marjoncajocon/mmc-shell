@@ -389,7 +389,7 @@ static LRESULT CALLBACK wndproc (HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       }
       break;
     case WM_DESTROY:
-      pty_close();
+      app_close_all();
       hwnd = NULL;
       PostQuitMessage(app_exit_code());
       return 0;

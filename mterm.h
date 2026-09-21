@@ -128,6 +128,7 @@ typedef struct Vt {
   uint32_t u8cp;
   int u8need;
   uint32_t last;	/* for REP */
+  int charset[2], gl;	/* G0/G1 is line drawing?, which one is active */
   void *ud;
   void (*reply) (void *ud, const char *s, size_t n);
   void (*title) (void *ud, const char *utf8);
@@ -233,6 +234,7 @@ typedef struct Frame {
 } Frame;
 
 #define MENU_MAX	16
+#define TAB_MAX	32
 
 typedef struct Menu {
   int open, x, y, w, h, hot, n;
@@ -247,6 +249,13 @@ typedef struct Scene {	/* everything the renderer needs to know */
   int head;	/* height of our own title bar, 0 = the system draws one */
   int pad, strip;	/* padding and gradient strip height in pixels */
   const char *title;
+  int bar;	/* height of the tab bar below it, 0 = one tab, no bar */
+  int ntabs, cur_tab;
+  int hot_tab, hot_close;	/* under the mouse: a tab (ntabs: the + button),
+				   and whether on its close box */
+  const char *tab_title[TAB_MAX];
+  unsigned char tab_news[TAB_MAX];	/* output came while it was hidden */
+  const char *edit;	/* the tab on screen is being renamed: the text so far */
   int hot_button;	/* header button under the mouse: 0 hide, 1 zoom, 2 close */
   int maximized;
   int cw, ch, ascent;
@@ -265,6 +274,10 @@ void draw_scrollbar_rect (const Frame *f, const Scene *s, int *x, int *y,
                           int *w, int *h);
 void draw_button_rect (const Frame *f, const Scene *s, int i, int *x, int *y,
                        int *w, int *h);
+void draw_tab_rect (const Frame *f, const Scene *s, int i, int *x, int *y,
+                    int *w, int *h);	/* i == ntabs: the + button */
+void draw_tab_close_rect (const Frame *f, const Scene *s, int i, int *x,
+                          int *y, int *w, int *h);
 int draw_text_width (const char *utf8);
 
 /* }================================================================== */
@@ -276,13 +289,15 @@ int draw_text_width (const char *utf8);
 ** ===================================================================
 */
 
-int pty_spawn (const char *exe, char **argv, int cols, int rows);
-void pty_write (const char *s, size_t n);
-void pty_resize (int cols, int rows);
-long pty_read (char *buf, size_t n);	/* 0: nothing now, -1: closed */
-int pty_fd (void);	/* POSIX: for poll(); -1 on Windows */
-int pty_exited (int *code);
-void pty_close (void);
+typedef struct Pty Pty;	/* one per tab */
+
+Pty *pty_spawn (const char *exe, char **argv, int cols, int rows);
+void pty_write (Pty *p, const char *s, size_t n);
+void pty_resize (Pty *p, int cols, int rows);
+long pty_read (Pty *p, char *buf, size_t n);	/* 0: nothing now, -1: closed */
+int pty_fd (Pty *p);	/* POSIX: for poll(); -1 on Windows */
+int pty_exited (Pty *p, int *code);
+void pty_close (Pty *p);	/* ends the program and frees p */
 
 /* }================================================================== */
 
@@ -331,6 +346,8 @@ void app_resizing (int on);
 const Frame *app_render (void);	/* NULL if nothing changed */
 int app_render_test (const char *native);
 int app_exit_code (void);
+int app_fds (int *fds, int max);	/* POSIX: the pty of every tab, for poll() */
+void app_close_all (void);	/* the window goes: end every tab */
 
 /* what is at this point of the window? (for our own title bar) */
 enum { HIT_CLIENT, HIT_CAPTION, HIT_BUTTON, HIT_UI };	/* UI: menu, scrollbar */

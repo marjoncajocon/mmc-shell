@@ -506,7 +506,7 @@ static void draw_cursor (Frame *f, const Scene *s) {
   if ((c.attr & A_WCONT) && g->cx > 0) c = l->c[g->cx - 1];
   px = s->pad + ((c.attr & A_WIDE) && (l->c[g->cx].attr & A_WCONT)
                    ? g->cx - 1 : g->cx) * s->cw;
-  py = s->head + s->strip + s->pad + g->cy * s->ch;
+  py = s->head + s->bar + s->strip + s->pad + g->cy * s->ch;
   w = s->cw * ((c.attr & A_WIDE) ? 2 : 1);
   if (!s->focused) {	/* hollow box */
     fill(f, px, py, w, 1, s->t->cursor);
@@ -529,7 +529,7 @@ static void draw_cursor (Frame *f, const Scene *s) {
 void draw_scrollbar_rect (const Frame *f, const Scene *s, int *x, int *y,
                           int *w, int *h) {
   const Grid *g = s->g;
-  int track_y = s->head + s->strip + 4, track_h = f->h - track_y - 4;
+  int track_y = s->head + s->bar + s->strip + 4, track_h = f->h - track_y - 4;
   int total = g->rows + g->sb_len;
   int th = (int)((long)track_h * g->rows / (total > 0 ? total : 1));
   if (th < 28) th = 28;
@@ -664,20 +664,140 @@ static void draw_header (Frame *f, const Scene *s) {
 /* }================================================================== */
 
 
+/*
+** {==================================================================
+** The tab bar: one tab per shell, and a + button; only there with 2+
+** ===================================================================
+*/
+
+/* tab i, or the + button when i == ntabs; tabs share the width equally */
+void draw_tab_rect (const Frame *f, const Scene *s, int i, int *x, int *y,
+                    int *w, int *h) {
+  int side = s->bar / 3, gap = s->bar / 8 + 1, top = s->bar / 5;
+  int plus = s->bar - top - 6;
+  int room = f->w - 2 * side - plus - gap;
+  int tw = room / (s->ntabs > 0 ? s->ntabs : 1);
+  if (tw > 26 * s->cw) tw = 26 * s->cw;
+  *y = s->head + top;
+  *h = s->bar - top;
+  if (i < s->ntabs) {
+    *x = side + i * tw;
+    *w = tw - gap;
+  }
+  else {
+    *x = side + s->ntabs * tw;
+    *y += (*h - plus) / 2;
+    *w = *h = plus;
+  }
+}
+
+
+/* the x at the right end of tab i */
+void draw_tab_close_rect (const Frame *f, const Scene *s, int i, int *x,
+                          int *y, int *w, int *h) {
+  int tx, ty, tw, th, c;
+  draw_tab_rect(f, s, i, &tx, &ty, &tw, &th);
+  c = th * 9 / 20;
+  *x = tx + tw - (th - c) / 2 - c;
+  *y = ty + (th - c) / 2;
+  *w = *h = c;
+}
+
+
+/* as much of the text as fits in 'room' pixels, ending in ... if cut */
+static void draw_text_fit (Frame *f, int x, int y, const char *utf8, int room,
+                           uint32_t fg, uint32_t bg) {
+  const char *p = utf8;
+  if (draw_text_width(utf8) <= room) {
+    draw_text(f, x, y, utf8, fg, bg, 0);
+    return;
+  }
+  room -= font_cell_w();	/* keep a cell for the ellipsis */
+  while (*p != '\0') {
+    uint32_t cp = next_cp(&p);
+    int w = font_cell_w() * grid_wcwidth(cp);
+    if (w > room) break;
+    blit_glyph(f, font_glyph(cp, 0, 0, dark_text(fg, bg)), x, y + font_ascent(),
+               fg, bg, 0, f->w);
+    x += w;
+    room -= w;
+  }
+  if (room >= 0)
+    blit_glyph(f, font_glyph(0x2026, 0, 0, dark_text(fg, bg)), x,
+               y + font_ascent(), fg, bg, 0, f->w);
+}
+
+
+static void draw_tabs (Frame *f, const Scene *s) {
+  const Theme *t = s->t;
+  uint32_t dim = mix(t->ui, t->ui_text, s->focused ? 150 : 110);
+  int i, x, y, w, h;
+  fill(f, 0, s->head, f->w, s->bar, t->ui);
+  for (i = 0; i < s->ntabs; i++) {
+    int active = (i == s->cur_tab), hot = (i == s->hot_tab);
+    int r, cx, cy, cw, chh, line;
+    uint32_t bg = active ? t->bg : t->ui;
+    uint32_t fg = active ? t->fg : hot ? t->ui_text : dim;
+    draw_tab_rect(f, s, i, &x, &y, &w, &h);
+    if (w < 4) continue;
+    r = h / 4;
+    /* the active tab runs down into the terminal: the same color joins them */
+    if (active) fill_round(f, x, y, w, h + r, r, t->bg, 255);
+    else if (hot) fill_round(f, x, y, w, h - 2, r, t->accent1, 40);
+    draw_tab_close_rect(f, s, i, &cx, &cy, &cw, &chh);
+    if (active && s->edit != NULL) {	/* being renamed: the end of the text, a cursor */
+      const char *p = s->edit;
+      int room = cx - x - 2 * s->cw - 4, ty = y + (h - s->ch) / 2;
+      fill_round(f, x + 3, y + 3, w - 6, h - 6, r, t->accent1, 60);
+      fill_round(f, x + 4, y + 4, w - 8, h - 8, r, t->bg, 255);
+      while (*p != '\0' && draw_text_width(p) > room) next_cp(&p);
+      draw_text(f, x + s->cw, ty, p, t->fg, t->bg, 0);
+      if (s->blink_on) fill(f, x + s->cw + draw_text_width(p), ty, 2, s->ch, t->accent1);
+    }
+    else if (w > 5 * s->cw)
+      draw_text_fit(f, x + s->cw, y + (h - s->ch) / 2,
+                    s->tab_title[i] ? s->tab_title[i] : "", cx - x - s->cw - 4, fg, bg);
+    if (active || hot) {	/* the x */
+      int m = cw / 4;
+      line = cw / 9 + 1;
+      if (hot && s->hot_close)
+        fill_round(f, cx - 2, cy - 2, cw + 4, chh + 4, (cw + 4) / 2, t->accent1, 80);
+      stroke(f, cx + m, cy + m, cx + cw - m - 1, cy + chh - m - 1, line, fg);
+      stroke(f, cx + cw - m - 1, cy + m, cx + m, cy + chh - m - 1, line, fg);
+    }
+    else if (s->tab_news[i]) {	/* a dot: something happened in there */
+      int d = cw / 2;
+      fill_round(f, cx + (cw - d) / 2, cy + (chh - d) / 2, d, d, d / 2, t->accent2, 255);
+    }
+  }
+  draw_tab_rect(f, s, s->ntabs, &x, &y, &w, &h);
+  if (s->hot_tab == s->ntabs) fill_round(f, x, y, w, h, w / 2, t->accent1, 60);
+  {
+    int line = w / 10 + 1, len = w / 2;
+    uint32_t c = s->hot_tab == s->ntabs ? t->ui_text : dim;
+    fill(f, x + (w - len) / 2, y + (h - line) / 2, len, line, c);
+    fill(f, x + (w - line) / 2, y + (h - len) / 2, line, len, c);
+  }
+}
+
+/* }================================================================== */
+
+
 void draw_scene (Frame *f, const Scene *s) {
   const Grid *g = s->g;
   const Theme *t = s->t;
   int row, x;
   fill(f, 0, 0, f->w, f->h, t->bg);
   if (s->head > 0) draw_header(f, s);
+  if (s->bar > 0) draw_tabs(f, s);
   for (x = 0; x < f->w; x++) {	/* the logo gradient: blue to green */
     uint32_t c = mix(t->accent1, t->accent2, f->w > 1 ? x * 255 / (f->w - 1) : 0);
-    fill(f, x, s->head, 1, s->strip, c);
+    fill(f, x, s->head + s->bar, 1, s->strip, c);
   }
   for (row = 0; row < g->rows; row++) {
     const Line *l = grid_view_line(g, row);
     int y = row - g->view;	/* in grid_line() terms, for the selection */
-    int py = s->head + s->strip + s->pad + row * s->ch;
+    int py = s->head + s->bar + s->strip + s->pad + row * s->ch;
     if (l == NULL) continue;
     /* backgrounds first, then the text: a glyph may lean into the next
     ** cell (italics, ClearType edges) without being painted over */

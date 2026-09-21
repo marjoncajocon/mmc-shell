@@ -422,7 +422,7 @@ int win_run (void) {
 
 
 void win_close (void) {
-  pty_close();
+  app_close_all();
   exit(app_exit_code());
 }
 

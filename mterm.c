@@ -20,7 +20,8 @@ static const char *const usage =
   "       [-e program [args...]]\n"
   "       " TERM_NAME " [--font-size N] --render-test out.bmp\n\n"
   "Settings: etc/mmcterm.conf in the mmc folder.\n"
-  "Keys: Ctrl+Shift+C/V copy and paste, Ctrl+Shift+T theme, Ctrl + and - zoom,\n"
+  "Keys: Ctrl+Shift+C/V copy and paste, Ctrl+Shift+T/W new and close tab,\n"
+  "Ctrl+Tab next tab, Ctrl+Shift+L theme, Ctrl + and - zoom,\n"
   "F11 full screen, Shift+PgUp/PgDn scroll, right click for the menu.";
 
 
