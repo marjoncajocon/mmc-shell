@@ -447,6 +447,10 @@ extern int sh_interactive;
 extern int sh_login;
 extern int sh_lineno;
 extern int sh_subshell;		/* nesting of ( ) and $( ) */
+extern int sh_dash_c;		/* started with -c: $- says c */
+extern int sh_command_number;	/* commands read so far: \# in the prompt */
+void sh_local_dash (void);	/* local -: set options come back at return */
+int hist_expand_word (const char *word, char **out);	/* history -p */
 extern long sh_pid;		/* $$ - the same in subshells */
 extern long sh_last_bg;		/* $! */
 extern Vec sh_pos;		/* $0 $1 ... */
@@ -564,6 +568,7 @@ Job *job_find (const char *spec);	/* %1 %+ %- %name pid */
 Job *job_by_pid (long pid);
 int job_wait (Job *j);	/* status of the last process */
 int job_wait_any (void);
+int job_wait_any_p (const char *pvar);	/* wait -n -p NAME */
 void job_poll (int report);	/* collect finished ones */
 void job_list (int fd, int mode);	/* 0 jobs, 1 -l, 2 -p */
 void job_remove (Job *j);
@@ -675,6 +680,7 @@ int b_compopt (int argc, char **argv, int in, int out, int err);
 */
 
 char *line_read (const char *prompt);	/* malloc'd; NULL on end of input */
+char *line_read_init (const char *prompt, const char *init);	/* read -e -i */
 char *line_read_raw (int fd, int delim, int nchars, int silent, int timeout_ms,
                      int *timed_out);	/* for 'read' */
 void line_hist_load (const char *native);

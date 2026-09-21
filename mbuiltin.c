@@ -262,6 +262,53 @@ static char *home_tilde (const char *p, int longform) {
 }
 
 
+/* is b one edit away from a (a letter wrong, missing, extra, or two swapped)? */
+static int one_off (const char *a, const char *b) {
+  size_t la = strlen(a), lb = strlen(b), i = 0;
+  while (i < la && i < lb && a[i] == b[i]) i++;
+  if (la == lb) {
+    if (i == la) return 0;
+    if (strcmp(a + i + 1, b + i + 1) == 0) return 1;
+    return i + 1 < la && a[i] == b[i + 1] && a[i + 1] == b[i] && strcmp(a + i + 2, b + i + 2) == 0;
+  }
+  if (la == lb + 1) return strcmp(a + i + 1, b + i) == 0;
+  if (lb == la + 1) return strcmp(a + i, b + i + 1) == 0;
+  return 0;
+}
+
+
+/* shopt -s cdspell: a folder that is not there, spelt a little wrong */
+static char *cd_spell (const char *target) {
+  char *native = path_to_native(target), *dir, *base, *ndir, *found = NULL;
+  const char *slash = strrchr(target, '/');
+  OsStat st;
+  Vec names;
+  size_t k;
+  if (os_stat(native, &st) == 0) {
+    free(native);
+    return NULL;
+  }
+  free(native);
+  dir = slash ? xstrndup(target, (size_t)(slash - target + 1)) : xstrdup("");
+  base = xstrdup(slash ? slash + 1 : target);
+  ndir = path_to_native(dir[0] ? dir : ".");
+  vec_init(&names);
+  os_listdir(ndir, &names);
+  for (k = 0; k < names.n && found == NULL; k++) {
+    char *full;
+    if (!one_off(base, names.v[k])) continue;
+    full = path_join(ndir, names.v[k]);
+    if (os_stat(full, &st) == 0 && st.is_dir) found = xstrcat3(dir, names.v[k], "");
+    free(full);
+  }
+  vec_free(&names);
+  free(ndir);
+  free(dir);
+  free(base);
+  return found;
+}
+
+
 static int b_cd (int argc, char **argv, int in, int out, int err) {
   const char *target;
   int i = 1, print = 0;
@@ -294,6 +341,24 @@ static int b_cd (int argc, char **argv, int in, int out, int err) {
   }
   else target = argv[i];
   if (target[0] == '\0') return 0;
+  if (opt_get("cdable_vars") && target[0] != '/' && is_name(target) && var_get(target) != NULL) {
+    OsStat st;	/* not a folder here, but a variable naming one */
+    char *native = path_to_native(target);
+    if (os_stat(native, &st) != 0 || !st.is_dir) {
+      target = var_get(target);
+      print = 1;
+    }
+    free(native);
+  }
+  if (opt_get("cdspell") && sh_interactive) {	/* one letter wrong, missing, extra or swapped */
+    char *fixed = cd_spell(target);
+    if (fixed != NULL) {
+      fd_printf(out, "%s\n", fixed);
+      i = change_dir(fixed, 0);
+      free(fixed);
+      return i != 0;
+    }
+  }
   /* CDPATH for names that do not start with / . or .. */
   if (target[0] != '/' && strncmp(target, "./", 2) != 0 && strncmp(target, "../", 3) != 0 &&
       strcmp(target, ".") != 0 && strcmp(target, "..") != 0 &&
@@ -885,6 +950,33 @@ static int b_history (int argc, char **argv, int in, int out, int err) {
     line_hist_delete(atoi(argv[2]) - 1);
     return 0;
   }
+  if (argc > 1 && (strcmp(argv[1], "-s") == 0 || strcmp(argv[1], "-p") == 0)) {
+    Buf b;
+    int k;
+    buf_init(&b);
+    for (k = 2; k < argc; k++) {
+      if (k > 2) buf_putc(&b, ' ');
+      buf_puts(&b, argv[k]);
+    }
+    if (argv[1][1] == 's') {	/* in place of this history line, the words */
+      if (sh_interactive && h->n > 0) line_hist_delete((int)h->n - 1);
+      if (b.len > 0) line_hist_add(b.s);
+    }
+    else {	/* history expansion, shown, not kept */
+      for (k = 2; k < argc; k++) {
+        char *ex = NULL;
+        int r = hist_expand_word(argv[k], &ex);
+        if (r < 0) {
+          buf_free(&b);
+          return 1;
+        }
+        fd_printf(out, "%s\n", r > 0 ? ex : argv[k]);
+        free(ex);
+      }
+    }
+    buf_free(&b);
+    return 0;
+  }
   if (argc > 1 && (strcmp(argv[1], "-w") == 0 || strcmp(argv[1], "-a") == 0 ||
                    strcmp(argv[1], "-r") == 0 || strcmp(argv[1], "-n") == 0)) {
     const char *file = argc > 2 ? argv[2] : var_get("HISTFILE");
@@ -1170,13 +1262,33 @@ static int b_enable (int argc, char **argv, int in, int out, int err) {
 }
 
 
+/* caller: "line file" of the call to this function; caller N: "line
+** function file" of the call N frames up (1 when there is no such frame) */
 static int b_caller (int argc, char **argv, int in, int out, int err) {
-  const char *fn;
-  (void)argc; (void)argv; (void)in; (void)err;
-  fn = var_aget("FUNCNAME", 1);
-  if (var_count("FUNCNAME") == 0) return 1;
-  fd_printf(out, "%d %s %s\n", sh_lineno, fn ? fn : "main",
-            sh_source_name ? sh_source_name : "main");
+  size_t depth = var_count("FUNCNAME");
+  long long n = -1;
+  const char *line, *fn, *file;
+  (void)in; (void)err;
+  if (argc > 1 && str_to_ll(argv[1], &n) != 0) {
+    sh_error("caller: %s: invalid number", argv[1]);
+    return 2;
+  }
+  if (depth == 0) {	/* not in a function: bash says this in a script */
+    if (sh_interactive) return 1;
+    fd_puts(out, "0 NULL\n");
+    return 0;
+  }
+  if (n < 0) {
+    line = var_aget("BASH_LINENO", 0);
+    file = var_aget("BASH_SOURCE", 1);
+    fd_printf(out, "%s %s\n", line ? line : "0", file ? file : "main");
+    return 0;
+  }
+  if ((size_t)n + 1 >= depth) return 1;
+  line = var_aget("BASH_LINENO", n);
+  fn = var_aget("FUNCNAME", n + 1);
+  file = var_aget("BASH_SOURCE", n + 1);
+  fd_printf(out, "%s %s %s\n", line ? line : "0", fn ? fn : "main", file ? file : "main");
   return 0;
 }
 

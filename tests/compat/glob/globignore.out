@@ -1,0 +1,6 @@
+a.sh b.sh c.txt d.txt
+.hidden c.txt d.txt
+.hidden c.txt
+a.sh b.sh c.txt d.txt
+.hidden
+status: 0

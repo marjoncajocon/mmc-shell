@@ -47,6 +47,7 @@ static int in_trap = 0;
 static int exit_trap_done = 0;
 
 static int exec_node (Node *n);
+int sh_dash_c = 0;
 
 
 /*
@@ -137,6 +138,7 @@ char *opt_flags (void) {
       if (o->letter == *p && !o->shopt && o->value) buf_putc(&b, *p);
   }
   if (sh_interactive) buf_putc(&b, 'i');
+  if (sh_dash_c) buf_putc(&b, 'c');	/* started with -c, like bash */
   return buf_take(&b);
 }
 
@@ -850,6 +852,35 @@ void func_names (Vec *out) {
 /* the line each call was made on; grows and shrinks with funcname_stack */
 static Vec callline_stack;
 
+/* every call's arguments in order, and how many each call had: BASH_ARGV
+** is the first read backwards, BASH_ARGC the second (bash fills them only
+** with shopt -s extdebug) */
+static Vec argv_stack, argc_stack;
+
+/* local -: the set options to put back when the function returns */
+static int *dash_values[MMC_FUNC_DEPTH + 1];
+
+
+void sh_local_dash (void) {
+  int n = 0, i;
+  if (func_depth == 0 || dash_values[func_depth] != NULL) return;
+  while (sh_opts[n].name) n++;
+  dash_values[func_depth] = (int *)xmalloc((size_t)n * sizeof(int));
+  for (i = 0; i < n; i++) dash_values[func_depth][i] = sh_opts[i].value;
+}
+
+
+static void update_args (void) {
+  size_t i;
+  if (!O("extdebug")) return;
+  var_make_array("BASH_ARGV", 0);
+  for (i = 0; i < argv_stack.n; i++)
+    var_aset("BASH_ARGV", (long long)i, argv_stack.v[argv_stack.n - 1 - i]);
+  var_make_array("BASH_ARGC", 0);
+  for (i = 0; i < argc_stack.n; i++)
+    var_aset("BASH_ARGC", (long long)i, argc_stack.v[argc_stack.n - 1 - i]);
+}
+
 
 /* FUNCNAME follows the call stack; [0] is the running function */
 static void update_funcname (void) {
@@ -891,8 +922,16 @@ int func_call (Func *f, int argc, char **argv) {
     char num[24];
     sprintf(num, "%d", sh_lineno);
     vec_push(&callline_stack, xstrdup(num));
+    if (argc_stack.n == 0) {	/* the script's own arguments at the bottom */
+      size_t k;
+      for (k = 1; k < saved_pos.n; k++) vec_push(&argv_stack, xstrdup(saved_pos.v[k]));
+      vec_push(&argc_stack, xstrdup(ll_to_str((long long)(saved_pos.n ? saved_pos.n - 1 : 0), num)));
+    }
+    for (i = 1; i < argc; i++) vec_push(&argv_stack, xstrdup(argv[i]));
+    vec_push(&argc_stack, xstrdup(ll_to_str(argc - 1, num)));
   }
   update_funcname();
+  update_args();
   source_push(source_top());
   func_depth++;
   return_frames++;
@@ -909,9 +948,22 @@ int func_call (Func *f, int argc, char **argv) {
     sh_run_string(traps[TRAP_RETURN], "trap", 1);
     in_trap--;
   }
+  if (dash_values[func_depth + 1] != NULL) {	/* local -: the options come back */
+    int k;
+    for (k = 0; sh_opts[k].name; k++) sh_opts[k].value = dash_values[func_depth + 1][k];
+    free(dash_values[func_depth + 1]);
+    dash_values[func_depth + 1] = NULL;
+  }
   source_pop();
   free(funcname_stack.v[--funcname_stack.n]);
   funcname_stack.v[funcname_stack.n] = NULL;
+  for (i = 1; i < argc && argv_stack.n > 0; i++) free(argv_stack.v[--argv_stack.n]);
+  if (argc_stack.n > 0) free(argc_stack.v[--argc_stack.n]);
+  if (funcname_stack.n == 0) {	/* back in main: the script's own go too */
+    while (argv_stack.n > 0) free(argv_stack.v[--argv_stack.n]);
+    while (argc_stack.n > 0) free(argc_stack.v[--argc_stack.n]);
+  }
+  update_args();
   if (callline_stack.n > 0) {
     free(callline_stack.v[--callline_stack.n]);
     callline_stack.v[callline_stack.n] = NULL;
@@ -1319,6 +1371,7 @@ char *sh_capture (const char *src, size_t *len) {
   state_save(&s);
   sh_fd[1] = p[1];
   sh_own[1] = 1;
+  if (!O("inherit_errexit") && !O("posix")) opt_set("errexit", 0);	/* like bash */
   status = sh_run_string(src, sh_source_name, sh_lineno);
   if (sh_exit) status = sh_status;
   returning = 0;
@@ -1550,7 +1603,14 @@ static void xtrace (char **argv, int argc, char **assigns, int nassigns) {
     free(q);
   }
   buf_putc(&b, '\n');
-  os_write(sh_fd[2] >= 0 ? sh_fd[2] : 2, b.s, b.len);
+  {	/* BASH_XTRACEFD: the trace goes to that fd */
+    const char *t = var_get("BASH_XTRACEFD");
+    long long k = -1;
+    int fd = sh_fd[2] >= 0 ? sh_fd[2] : 2;
+    if (t != NULL && *t && str_to_ll(t, &k) == 0 && k >= 0 && k < MMC_FDS && sh_fd[k] >= 0)
+      fd = sh_fd[k];
+    os_write(fd, b.s, b.len);
+  }
   buf_free(&b);
 }
 
@@ -1905,7 +1965,7 @@ static int do_exec (Vec *argv, Node *n) {
     sh_error("%s: not found", rest.v[0]);
     fd_restore(&sv);
     vec_free(&rest);
-    if (!sh_interactive) {
+    if (!sh_interactive && !O("execfail")) {
       sh_exit = 1;
       sh_status = 127;
     }

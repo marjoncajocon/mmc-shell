@@ -1,0 +1,8 @@
+before: hB
+in: fhuB
+after: hB
+noclobber on in g, x=1
+noclobber off again
+no inherit: [unset]
+inherit: [outer]
+status: 0

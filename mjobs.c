@@ -29,6 +29,10 @@ typedef struct Done {
 static Done done_list[256];
 static int ndone = 0;
 
+/* jobs a script had end without anyone waiting yet: wait -n still gets them */
+static Done unwaited[64];
+static int nunwaited = 0;
+
 
 static void remember_done (long pid, int status) {
   done_list[ndone % 256].pid = pid;
@@ -246,6 +250,11 @@ void job_poll (int report) {
                      j->id == cur_job ? '+' : j->id == prev_job ? '-' : ' ', j->status, j->cmd);
     }
     if (report || !sh_interactive) {
+      if (!report && nunwaited < 64) {	/* ended quietly: wait -n may still ask */
+        unwaited[nunwaited].pid = j->pid;
+        unwaited[nunwaited].status = j->status;
+        nunwaited++;
+      }
       job_remove(j);
       i--;
     }
@@ -270,13 +279,32 @@ int job_wait (Job *j) {
 
 
 int job_wait_any (void) {
+  return job_wait_any_p(NULL);
+}
+
+
+/* wait -n [-p NAME]: the next job to end; NAME gets its pid */
+int job_wait_any_p (const char *pvar) {
   for (;;) {
     int i;
+    if (nunwaited > 0) {	/* one that already ended, oldest first */
+      Done d = unwaited[0];
+      memmove(unwaited, unwaited + 1, (size_t)(--nunwaited) * sizeof(Done));
+      if (pvar != NULL) {
+        char num[24];
+        var_set(pvar, ll_to_str(d.pid, num));
+      }
+      return d.status;
+    }
     if (njobs == 0) return 127;
     job_poll(0);
     for (i = 0; i < njobs; i++)
       if (jobs[i]->running == 0) {
         int st = jobs[i]->status;
+        if (pvar != NULL) {
+          char num[24];
+          var_set(pvar, ll_to_str(jobs[i]->pid, num));
+        }
         job_remove(jobs[i]);
         return st;
       }
@@ -289,11 +317,14 @@ int job_wait_any (void) {
 }
 
 
-void job_list (int fd, int mode) {
+/* mode: 0 short, 1 long (-l), 2 pids (-p); which: 0 all, 'r' running, 's' stopped */
+void job_list_which (int fd, int mode, int which) {
   int i;
   job_poll(0);
   for (i = 0; i < njobs; i++) {
     Job *j = jobs[i];
+    if (which == 'r' && (j->running == 0 || j->stopped)) continue;
+    if (which == 's' && !j->stopped) continue;
     char mark = j->id == cur_job ? '+' : j->id == prev_job ? '-' : ' ';
     const char *state = j->running > 0 ? (j->stopped ? "Stopped" : "Running") :
                         (j->status == 0 ? "Done" : "Exit");
@@ -312,12 +343,19 @@ void job_list (int fd, int mode) {
 ** ===================================================================
 */
 
+void job_list (int fd, int mode) {
+  job_list_which(fd, mode, 0);
+}
+
+
 int b_jobs (int argc, char **argv, int in, int out, int err) {
-  int i, mode = 0;
+  int i, mode = 0, which = 0;
   (void)in; (void)err;
   for (i = 1; i < argc && argv[i][0] == '-'; i++) {
     if (strchr(argv[i], 'l')) mode = 1;
     if (strchr(argv[i], 'p')) mode = 2;
+    if (strchr(argv[i], 'r')) which = 'r';
+    if (strchr(argv[i], 's')) which = 's';
   }
   if (i < argc) {
     for (; i < argc; i++) {
@@ -332,25 +370,30 @@ int b_jobs (int argc, char **argv, int in, int out, int err) {
     }
     return 0;
   }
-  job_list(out, mode);
+  job_list_which(out, mode, which);
   return 0;
 }
 
 
 int b_wait (int argc, char **argv, int in, int out, int err) {
   int i, status = 0, any = 0;
+  const char *pvar = NULL;	/* wait -p NAME: the pid of what ended goes there */
   (void)in; (void)out; (void)err;
   for (i = 1; i < argc && argv[i][0] == '-' && argv[i][1] != '\0'; i++) {
     if (strcmp(argv[i], "-n") == 0) any = 1;
     else if (strcmp(argv[i], "-f") == 0) continue;
-    else if (strcmp(argv[i], "-p") == 0) i++;
+    else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
+      pvar = argv[++i];
+      var_unset(pvar);
+    }
     else if (strcmp(argv[i], "--") == 0) {
       i++;
       break;
     }
   }
-  if (any) return job_wait_any();
+  if (any) return job_wait_any_p(pvar);
   if (i >= argc) {	/* wait for everything */
+    nunwaited = 0;
     while (job_count() > 0) {
       Job *j = job_find("%+");
       if (j == NULL) break;
@@ -365,6 +408,14 @@ int b_wait (int argc, char **argv, int in, int out, int err) {
       int st;
       if (argv[i][0] != '%' && str_to_ll(argv[i], &pid) == 0 &&
           job_status_of_pid((long)pid, &st)) {
+        int k;
+        for (k = 0; k < nunwaited; k++)	/* waited for now */
+          if (unwaited[k].pid == (long)pid) {
+            memmove(unwaited + k, unwaited + k + 1, (size_t)(nunwaited - k - 1) * sizeof(Done));
+            nunwaited--;
+            break;
+          }
+        if (pvar != NULL) var_set(pvar, argv[i]);
         status = st;
         continue;
       }
@@ -372,6 +423,10 @@ int b_wait (int argc, char **argv, int in, int out, int err) {
       else sh_error("wait: pid %s is not a child of this shell", argv[i]);
       status = 127;
       continue;
+    }
+    if (pvar != NULL) {
+      char num[24];
+      var_set(pvar, ll_to_str(j->pid, num));
     }
     status = job_wait(j);
   }

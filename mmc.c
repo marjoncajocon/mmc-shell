@@ -880,10 +880,9 @@ static int hist_expand (const char *line, char **out) {
   }
   buf_init(&b);
   while (*p != '\0') {
-    if (*p == '\\' && p[1] == '!') {	/* \! is a plain ! */
-      buf_putc(&b, '!');
+    if (*p == '\\' && p[1] == '!') {	/* \! is not expanded; the parser sees it as typed */
+      buf_putn(&b, p, 2);
       p += 2;
-      changed = 1;
       continue;
     }
     if (*p == '\'' && !sq) sq = 1;
@@ -922,6 +921,12 @@ static int hist_expand (const char *line, char **out) {
     *out = xstrdup("");
   }
   return 1;
+}
+
+
+/* history -p: one word through history expansion (1 changed, 0 not, -1 bad) */
+int hist_expand_word (const char *word, char **out) {
+  return hist_expand(word, out);
 }
 
 
@@ -972,6 +977,9 @@ static void run_prompt_command (void) {
   }
   sh_status = saved;	/* $? keeps the status of the command, not of the hook */
 }
+
+
+int sh_command_number = 0;
 
 
 static void repl (void) {
@@ -1058,6 +1066,7 @@ static void repl (void) {
       line_hist_add(h);
       free(h);
     }
+    sh_command_number++;
     sh_run_string(cmd.s, sh_interactive ? NULL : "mmc", line0);
     {	/* line numbers keep counting over the whole input */
       const char *p;
@@ -1340,6 +1349,7 @@ int main (int argc, char **argv) {
     else break;
   }
   os_init();
+  if (command != NULL) sh_dash_c = 1;
   if (command != NULL) {	/* -c 'cmd' [name [args]] */
     vec_push(&sh_pos, xstrdup(i < argc ? argv[i++] : MMC_NAME));
     for (; i < argc; i++) vec_push(&sh_pos, xstrdup(argv[i]));

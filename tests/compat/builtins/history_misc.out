@@ -1,0 +1,4 @@
+hc=0
+ok
+set -o lists
+status: 0

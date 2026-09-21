@@ -1,0 +1,5 @@
++ echo traced
+traced
++ set +x
+done
+status: 0

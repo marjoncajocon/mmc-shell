@@ -1095,6 +1095,12 @@ static int ed_external (Edit *e) {
 
 
 char *line_read (const char *prompt) {
+  return line_read_init(prompt, NULL);
+}
+
+
+/* read -e -i TEXT: the line starts with TEXT in it */
+char *line_read_init (const char *prompt, const char *init) {
   Edit e;
   size_t hpos = hist.n;	/* hist.n means "the line being typed" */
   size_t larg_hist = 0, larg_at = 0, larg_len = 0;	/* what Alt-. put in */
@@ -1114,6 +1120,7 @@ char *line_read (const char *prompt) {
   e.prompt = prompt;
   e.pwidth = prompt_width(prompt);
   e.crow = e.erow = 0;
+  if (init != NULL) ed_set(&e, init);
   undo_clear();
   os_write(1, "\033[?2004h", 8);	/* bracketed paste on */
   ed_refresh(&e);

@@ -326,6 +326,8 @@ static int exists (const char *posix, int want_dir) {
 
 
 static void glob_rec (const char *prefix, const char *pat, Vec *out, int flags);
+static int globignore_on (void);
+static int skip_dots (const char *name);
 
 
 /* "**": this directory and every directory below it */
@@ -400,7 +402,7 @@ static void glob_rec (const char *prefix, const char *pat, Vec *out, int flags) 
     size_t i;
     int mflags = flags | PM_PERIOD;
     char *dir = path_to_native(prefix[0] ? prefix : ".");
-    if (O("dotglob")) mflags &= ~PM_PERIOD;
+    if (O("dotglob") || globignore_on()) mflags &= ~PM_PERIOD;
     if (comp[0] == '.' || (comp[0] == QMARK && comp[1] == '.')) mflags &= ~PM_PERIOD;
     vec_init(&names);
     os_listdir(dir, &names);
@@ -408,6 +410,7 @@ static void glob_rec (const char *prefix, const char *pat, Vec *out, int flags) 
     for (i = 0; i < names.n; i++) {
       const char *name = names.v[i];
       char *next;
+      if (skip_dots(name)) continue;
       if (!match(comp, comp + strlen(comp), name, name + strlen(name), mflags)) continue;
       next = xstrcat3(prefix, name, slash ? "/" : "");
       if (rest) {
@@ -424,6 +427,38 @@ static void glob_rec (const char *prefix, const char *pat, Vec *out, int flags) 
 }
 
 
+/* GLOBIGNORE is set: its names go, and dot files come (like bash) */
+static int globignore_on (void) {
+  const char *g = var_get("GLOBIGNORE");
+  return g != NULL && *g != '\0';
+}
+
+
+/* . and .. are never a glob's result (globskipdots, and with GLOBIGNORE) */
+static int skip_dots (const char *name) {
+  return (O("globskipdots") || globignore_on()) &&
+         (strcmp(name, ".") == 0 || strcmp(name, "..") == 0);
+}
+
+
+static int globignored (const char *path) {
+  const char *g = var_get("GLOBIGNORE"), *p;
+  const char *base = strrchr(path, '/');
+  base = base ? base + 1 : path;
+  if (strcmp(base, ".") == 0 || strcmp(base, "..") == 0) return 1;
+  for (p = g; *p;) {
+    size_t n = strcspn(p, ":");
+    char *pat = xstrndup(p, n);
+    int hit = n > 0 && pat_match(pat, path, 0);
+    free(pat);
+    if (hit) return 1;
+    p += n;
+    if (*p == ':') p++;
+  }
+  return 0;
+}
+
+
 void glob_expand (const char *marked, Vec *out) {
   int flags = 0;
   size_t before = out->n;
@@ -435,6 +470,15 @@ void glob_expand (const char *marked, Vec *out) {
     glob_rec("/", p, out, flags);
   }
   else glob_rec("", marked, out, flags);
+  if (globignore_on()) {	/* what GLOBIGNORE names goes */
+    size_t i, k = before;
+    for (i = before; i < out->n; i++) {
+      if (globignored(out->v[i])) free(out->v[i]);
+      else out->v[k++] = out->v[i];
+    }
+    out->n = k;
+    out->v[k] = NULL;
+  }
   /* results of one pattern are sorted as a whole */
   if (out->n - before > 1) {
     Vec part;

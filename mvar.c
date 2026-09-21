@@ -252,6 +252,8 @@ static const char *special_get (Var *v) {
   }
   if (strcmp(n, "LINENO") == 0) return ll_to_str(sh_lineno, out);
   if (strcmp(n, "BASHPID") == 0) return ll_to_str(os_getpid(), out);
+  if (strcmp(n, "HISTCMD") == 0)	/* the history number of this command */
+    return ll_to_str(sh_interactive ? (long long)line_hist()->n : 0, out);
   return v->val;
 }
 
@@ -886,7 +888,7 @@ void var_init (void) {
   size_t i;
   static const char *const specials[] = {
     "RANDOM", "SRANDOM", "SECONDS", "EPOCHSECONDS", "EPOCHREALTIME", "LINENO",
-    "BASHPID", NULL
+    "BASHPID", "HISTCMD", NULL
   };
   vec_init(&env);
   vec_init(&passthrough);

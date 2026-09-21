@@ -474,7 +474,8 @@ static int is_ifs_ws (int c, const char *ifs) {
 
 
 int b_read (int argc, char **argv, int in, int out, int err) {
-  int raw = 0, silent = 0, nchars = -1, exact = 0, delim = '\n', fd = in, i;
+  int raw = 0, silent = 0, nchars = -1, exact = 0, delim = '\n', fd = in, i, edit = 0;
+  const char *init = NULL;	/* read -e -i: the text the line starts with */
   long long deadline = 0;
   const char *prompt = NULL, *array = NULL;
   Buf line, marks;	/* marks: 1 where a character was escaped */
@@ -482,6 +483,11 @@ int b_read (int argc, char **argv, int in, int out, int err) {
   const char *ifs = var_get("IFS");
   (void)out; (void)err;
   if (ifs == NULL) ifs = " \t\n";
+  {	/* $TMOUT: how long read waits when -t does not say */
+    const char *tm = var_get("TMOUT");
+    double t = tm ? atof(tm) : 0;
+    if (t > 0) deadline = os_now_us() + (long long)(t * 1e6);
+  }
   for (i = 1; i < argc && argv[i][0] == '-' && argv[i][1] != '\0'; i++) {
     const char *a = argv[i] + 1;
     if (strcmp(argv[i], "--") == 0) {
@@ -501,7 +507,8 @@ int b_read (int argc, char **argv, int in, int out, int err) {
       switch (*a) {
         case 'r': raw = 1; break;
         case 's': silent = 1; break;
-        case 'e': break;
+        case 'e': edit = 1; break;
+        case 'i': init = val; break;
         case 'p': prompt = val; break;
         case 'n': nchars = atoi(val); break;
         case 'N': nchars = atoi(val); exact = 1; break;
@@ -524,7 +531,6 @@ int b_read (int argc, char **argv, int in, int out, int err) {
           break;
         }
         case 'a': array = val; break;
-        case 'i': break;
         default:
           sh_error("read: -%c: invalid option", *a);
           return 2;
@@ -532,10 +538,31 @@ int b_read (int argc, char **argv, int in, int out, int err) {
       if (val != NULL) break;
     }
   }
-  if (prompt != NULL && os_is_tty(fd)) fd_puts(sh_fd[2] >= 0 ? sh_fd[2] : 2, prompt);
+  if (edit && (fd != 0 || !os_is_tty(0) || !os_is_tty(1) || silent || nchars >= 0))
+    edit = 0;	/* the line editor only for a whole line typed at a terminal */
+  if (prompt != NULL && os_is_tty(fd) && !edit) fd_puts(sh_fd[2] >= 0 ? sh_fd[2] : 2, prompt);
   if (silent && os_is_tty(fd) && fd == 0) raw_tty = (os_tty_raw(1) == 0);
   buf_init(&line);
   buf_init(&marks);
+  if (edit) {	/* read -e: typed with the line editor (keys, Tab, history) */
+    char *got = line_read_init(prompt ? prompt : "", init);
+    const char *q;
+    if (got == NULL) status = 1;
+    else {
+      for (q = got; *q; q++) {
+        if (!raw && q[0] == '\\' && q[1] != '\0') {
+          q++;
+          buf_putc(&line, *q);
+          buf_putc(&marks, 1);
+          continue;
+        }
+        buf_putc(&line, *q);
+        buf_putc(&marks, 0);
+      }
+      free(got);
+    }
+    goto split;
+  }
   for (;;) {
     if (nchars >= 0 && (int)utf8_count(line.s ? line.s : "", line.len) >= nchars) break;
     c = raw_tty ? os_tty_getbyte() : read_byte(fd, deadline);
@@ -584,6 +611,7 @@ int b_read (int argc, char **argv, int in, int out, int err) {
     os_tty_raw(0);
     fd_puts(2, "\n");
   }
+ split:
   if (line.s == NULL) {
     buf_putc(&line, '\0');
     line.len = 0;
@@ -667,8 +695,9 @@ int b_read (int argc, char **argv, int in, int out, int err) {
 
 int b_mapfile (int argc, char **argv, int in, int out, int err) {
   int i, delim = '\n', trim = 0, fd = in;
-  long long count = 0, origin = 0, skip = 0, n = 0;
+  long long count = 0, origin = 0, skip = 0, n = 0, quantum = 5000;
   int keep_origin = 0;
+  const char *callback = NULL;	/* -C: run every -c lines with the index and the line */
   const char *name = "MAPFILE";
   Buf line;
   (void)out; (void)err;
@@ -697,7 +726,13 @@ int b_mapfile (int argc, char **argv, int in, int out, int err) {
         fd = sh_fd[k];
         break;
       }
-      case 'C': case 'c': break;
+      case 'C': callback = val; break;
+      case 'c':
+        if (str_to_ll(val, &quantum) != 0 || quantum <= 0) {
+          sh_error("mapfile: %s: invalid callback quantum", val);
+          return 1;
+        }
+        break;
       default:
         sh_error("mapfile: -%c: invalid option", *a);
         return 2;
@@ -719,6 +754,20 @@ int b_mapfile (int argc, char **argv, int in, int out, int err) {
     if (r == 1 && !trim) buf_putc(&line, (char)c);
     if (skip > 0) skip--;
     else {
+      if (callback != NULL && *callback && (n + 1) % quantum == 0) {	/* before it is stored */
+        char num[24], *q = shell_quote(line.s ? line.s : ""), *cmd;
+        Buf c;
+        buf_init(&c);
+        buf_puts(&c, callback);
+        buf_putc(&c, ' ');
+        buf_puts(&c, ll_to_str(origin + n, num));
+        buf_putc(&c, ' ');
+        buf_puts(&c, line.s ? q : "''");
+        cmd = buf_take(&c);
+        sh_run_string(cmd, "mapfile", sh_lineno);
+        free(cmd);
+        free(q);
+      }
       var_aset(name, origin + n, line.s ? line.s : "");
       n++;
       if (count > 0 && n >= count) {

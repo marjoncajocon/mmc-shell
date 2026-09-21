@@ -535,9 +535,47 @@ int b_declare (int argc, char **argv, int in, int out, int err) {
 }
 
 
+/*
+** local: "-" keeps the set options, to come back when the function
+** returns; with shopt -s localvar_inherit a new local starts with the
+** value of the one it hides
+*/
 int b_local (int argc, char **argv, int in, int out, int err) {
+  char **args = (char **)xmalloc(((size_t)argc + 1) * sizeof(char *));
+  int n = 0, i, status, opts = 1, dash = 0;
+  Vec made;
   (void)in; (void)err;
-  return declare_common(argc, argv, out, 1);
+  vec_init(&made);
+  for (i = 0; i < argc; i++) {
+    const char *a = argv[i];
+    if (i > 0 && opts && strcmp(a, "-") == 0) {
+      dash = 1;
+      continue;
+    }
+    if (i > 0 && (a[0] != '-' && a[0] != '+')) opts = 0;
+    if (i > 0 && !opts && opt_get("localvar_inherit") && strchr(a, '=') == NULL &&
+        is_name(a) && var_get(a) != NULL) {
+      char *w = xstrcat3(a, "=", var_get(a));
+      vec_push(&made, w);
+      args[n++] = w;
+      continue;
+    }
+    args[n++] = argv[i];
+  }
+  args[n] = NULL;
+  if (dash) {
+    if (!var_in_function()) {
+      sh_error("local: can only be used in a function");
+      free(args);
+      vec_free(&made);
+      return 1;
+    }
+    sh_local_dash();
+  }
+  status = (dash && n == 1) ? 0 : declare_common(n, args, out, 1);
+  free(args);
+  vec_free(&made);
+  return status;
 }
 
 

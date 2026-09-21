@@ -1,0 +1,13 @@
+2 caller_argv.sh
+2 f caller_argv.sh
+10 main caller_argv.sh
+past the top: 1
+argc= argv=
+2 caller_argv.sh
+2 f caller_argv.sh
+12 main caller_argv.sh
+past the top: 1
+argc=2 3 0 argv=y x c b a
+0 NULL
+outside a function: 0
+status: 0

@@ -485,11 +485,19 @@ console (the key goes to the program as a key), but `kill -STOP %1` and
 it. A pipeline whose reader stops early (`yes | head -1`) ends at once on
 Windows too, as SIGPIPE does elsewhere.
 `ulimit` reports what mmc has and says so when it cannot change a limit.
-These `shopt` options are accepted but do nothing: `cdspell`, `dirspell`,
-`execfail`, `extdebug`, `inherit_errexit`, `localvar_inherit`,
-`localvar_unset`, `globskipdots`, `cdable_vars` and the `compat*` ones;
-`autocd`, `checkjobs`, `huponexit`, `histappend`, `lastpipe`, `extglob`,
-`nullglob`, `dotglob`, `globstar`, `nocaseglob` and `nocasematch` do work.
+`shopt` options that work: `autocd`, `cdable_vars`, `cdspell` (a folder
+name one letter off is corrected), `checkjobs`, `execfail`, `extdebug` (it
+fills `BASH_ARGV` and `BASH_ARGC`), `extglob`, `globskipdots`, `globstar`,
+`huponexit`, `histappend`, `inherit_errexit` (without it `set -e` is off
+inside `$( )`, as in bash), `lastpipe`, `localvar_inherit`, `nullglob`,
+`dotglob`, `nocaseglob` and `nocasematch`. Accepted but doing nothing:
+`dirspell`, `localvar_unset`, `gnu_errfmt` and the `compat*` ones.
+
+Also there: `local -` (the `set` options come back when the function
+returns), `caller` and `caller N`, `GLOBIGNORE`, `HISTCMD`, `BASH_XTRACEFD`,
+`TMOUT` (the timeout of `read`), `read -e` (the line editor, `-i` puts text
+in first), `wait -p NAME`, `jobs -r` / `-s`, `history -s` / `-p`, `mapfile -C`
+/ `-c`, and `\#` / `\!` in the prompt.
 
 ## How git-bash does it
 

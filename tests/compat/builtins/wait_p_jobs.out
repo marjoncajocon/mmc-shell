@@ -1,0 +1,4 @@
+wait -p: the pid
+wait -n -p: a pid
+jobs -s: 0
+status: 0

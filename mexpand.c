@@ -1710,8 +1710,16 @@ char *expand_prompt (const char *ps) {
         buf_puts(&b, ll_to_str(job_count(), num));
         break;
       }
-      case '#':
-      case '!': buf_putc(&b, '1'); break;
+      case '#': {	/* this command's number in this shell */
+        char num[24];
+        buf_puts(&b, ll_to_str(sh_command_number + 1, num));
+        break;
+      }
+      case '!': {	/* its number in the history */
+        char num[24];
+        buf_puts(&b, ll_to_str((long long)line_hist()->n + 1, num));
+        break;
+      }
       case 't':
       case 'T':
       case '@':
