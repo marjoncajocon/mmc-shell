@@ -259,8 +259,17 @@ static const char *const box_arms[128] = {
 };
 
 
+/*
+** left_edge: the character is in the first column. Its up and down line
+** then goes where letters start, not through the middle of the cell, so
+** a prompt like
+**   ┌─[user]
+**   └─$
+** lines up with the text above and below it. Every box character of
+** that column moves alike, so the lines still join.
+*/
 static int draw_box (Frame *f, uint32_t cp, int x, int y, int w, int h,
-                     uint32_t fg) {
+                     uint32_t fg, int left_edge) {
   const char *arms = box_arms[cp - 0x2500];
   int a[4], i;
   int t1 = (w + 4) / 8, t2, d;
@@ -273,6 +282,10 @@ static int draw_box (Frame *f, uint32_t cp, int x, int y, int w, int h,
   for (i = 0; i < 4; i++) a[i] = arms[i] - '0';
   dbl_h = (a[0] == 3 || a[1] == 3);
   dbl_v = (a[2] == 3 || a[3] == 3);
+  if (left_edge) {	/* the widest up/down line starts one pixel in, like a letter's stem */
+    int tv = (a[2] == 2 || a[3] == 2) ? t2 : t1;
+    cx = x + 1 + (dbl_v ? d + t1 / 2 : tv / 2);
+  }
   active = dbl_h && dbl_v;	/* a real double corner or junction */
   for (i = 0; i < 4; i++) {
     int t = (a[i] == 2) ? t2 : t1;
@@ -534,7 +547,7 @@ static void draw_cell_fg (Frame *f, const Scene *s, const Cell *c, int px,
   if (ch > ' ' && !(c->attr & A_HIDDEN) && (!(c->attr & A_BLINK) || s->text_blink_on)) {
     int drawn = 0;
     if (ch >= 0x2500 && ch <= 0x257F)
-      drawn = draw_box(f, ch, px, py, w, s->ch, fg);
+      drawn = draw_box(f, ch, px, py, w, s->ch, fg, px == (s->ox > 0 ? s->ox : s->pad));
     else if (ch >= 0x2580 && ch <= 0x259F)
       drawn = draw_block(f, ch, px, py, w, s->ch, fg);
     else if (ch >= 0xE0B0 && ch <= 0xE0BF)
