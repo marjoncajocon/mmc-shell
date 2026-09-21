@@ -703,25 +703,64 @@ void draw_scrollbar_rect (const Frame *f, const Scene *s, int *x, int *y,
 }
 
 
+void menu_layout (Menu *m, int cell_w, int cell_h, int max_h) {
+  int i, widest = 0, pad, x, y, bottom = 0;
+  for (i = 0; i < m->n; i++) {
+    int w = m->label[i] ? draw_text_width(m->label[i]) : 0;
+    if (m->label[i] && m->hint[i]) w += draw_text_width(m->hint[i]) + 3 * cell_w;
+    if (w > widest) widest = w;
+  }
+  m->colw = widest + 32;
+  for (pad = 10; pad > 2; pad--) {	/* one column, as roomy as fits */
+    int h = 12;
+    for (i = 0; i < m->n; i++) h += m->label[i] ? cell_h + pad : 9;
+    if (h <= max_h) break;
+  }
+  m->row = cell_h + pad;
+  x = 0;
+  y = 6;
+  for (i = 0; i < m->n; i++) {
+    int h = m->label[i] ? m->row : 9;
+    if (y + h + 6 > max_h && y > 6) {	/* the next column */
+      x += m->colw;
+      y = 6;
+    }
+    if (m->label[i] == NULL && (y == 6 || i == m->n - 1 ||
+        y + h + m->row + 6 > max_h)) {
+      m->ix[i] = m->iy[i] = -1;	/* no separator at a column's edge */
+      continue;
+    }
+    m->ix[i] = x;
+    m->iy[i] = y;
+    y += h;
+    if (y > bottom) bottom = y;
+  }
+  m->w = x + m->colw;
+  m->h = bottom + 6;
+}
+
+
 static void draw_menu (Frame *f, const Scene *s) {
   const Menu *m = s->menu;
   const Theme *t = s->t;
-  int i, y = m->y + 6, row = s->ch + 10;
+  int i, c;
   fill_round(f, m->x + 3, m->y + 5, m->w, m->h, 10, 0x000000, 70);	/* shadow */
   fill_round(f, m->x - 1, m->y - 1, m->w + 2, m->h + 2, 11, t->accent1, 150);
   fill_round(f, m->x, m->y, m->w, m->h, 10, t->ui, 255);
+  for (c = m->colw; c < m->w; c += m->colw)	/* between columns */
+    fill_alpha(f, m->x + c, m->y + 10, 1, m->h - 20, t->ui_text, 50);
   for (i = 0; i < m->n; i++) {
+    int x = m->x + m->ix[i], y = m->y + m->iy[i], pad = (m->row - s->ch) / 2;
+    if (m->ix[i] < 0) continue;
     if (m->label[i] == NULL) {	/* separator */
-      fill_alpha(f, m->x + 12, y + 4, m->w - 24, 1, t->ui_text, 50);
-      y += 9;
+      fill_alpha(f, x + 12, y + 4, m->colw - 24, 1, t->ui_text, 50);
       continue;
     }
-    if (i == m->hot) fill_round(f, m->x + 5, y, m->w - 10, row, 7, t->accent1, 70);
-    draw_text(f, m->x + 16, y + 5, m->label[i], t->ui_text, t->ui, 0);
+    if (i == m->hot) fill_round(f, x + 5, y, m->colw - 10, m->row, 7, t->accent1, 70);
+    draw_text(f, x + 16, y + pad, m->label[i], t->ui_text, t->ui, 0);
     if (m->hint[i] != NULL)
-      draw_text(f, m->x + m->w - 16 - draw_text_width(m->hint[i]), y + 5,
+      draw_text(f, x + m->colw - 16 - draw_text_width(m->hint[i]), y + pad,
                 m->hint[i], mix(t->ui, t->ui_text, 120), t->ui, 0);
-    y += row;
   }
 }
 

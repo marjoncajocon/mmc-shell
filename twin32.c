@@ -273,15 +273,16 @@ static void paint (void) {
   const Frame *f = app_render();
   int only_ours = EqualRect(&ps.rcPaint, &ours);
   if (f != NULL) last_frame = f;
-  if (last_frame != NULL && last_frame->px != NULL) {
-    if (only_ours && f != NULL && f->dh > 0 && f->dh < f->h) {
-      HDC wdc = GetDC(hwnd);	/* not clipped to the one pixel */
-      put_rows(wdc, f, f->dy, f->dh);
-      ReleaseDC(hwnd, wdc);
-    }
-    else if (!only_ours || f != NULL)
-      put_rows(dc, last_frame, 0, last_frame->h);
+  if (f != NULL && f->px != NULL) {
+    /* something new was drawn: BeginPaint's dc is clipped to what was
+    ** marked (maybe only our one pixel), so copy through an unclipped one */
+    HDC wdc = GetDC(hwnd);
+    if (only_ours && f->dh > 0 && f->dh < f->h) put_rows(wdc, f, f->dy, f->dh);
+    else put_rows(wdc, f, 0, f->h);
+    ReleaseDC(hwnd, wdc);
   }
+  else if (!only_ours && last_frame != NULL && last_frame->px != NULL)
+    put_rows(dc, last_frame, 0, last_frame->h);	/* uncovered: same picture */
   EndPaint(hwnd, &ps);
 }
 

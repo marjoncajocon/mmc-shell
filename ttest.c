@@ -576,8 +576,7 @@ static int render (const char *out, const char *theme_name, const char *font,
   m.label[4] = "New window";  m.hint[4] = "Ctrl+Shift+N";
   m.label[5] = "About mmc-term";
   m.hot = 3;
-  m.w = 30 * s.cw;
-  m.h = 5 * (s.ch + 10) + 9 + 12;
+  menu_layout(&m, s.cw, s.ch, 1000);
   m.x = 50 * s.cw;
   m.y = 16 * s.ch - 40;
   s.menu = &m;

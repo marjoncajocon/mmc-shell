@@ -341,6 +341,8 @@ typedef struct Menu {
   const char *label[MENU_MAX];	/* NULL: separator */
   const char *hint[MENU_MAX];
   int id[MENU_MAX];
+  int row, colw;	/* set by menu_layout: an entry's height, a column's width */
+  int ix[MENU_MAX], iy[MENU_MAX];	/* each entry from the top left; -1: not shown */
 } Menu;
 
 typedef struct Scene {	/* everything the renderer needs to know */
@@ -395,6 +397,9 @@ void draw_tab_rect (const Frame *f, const Scene *s, int i, int *x, int *y,
 void draw_tab_close_rect (const Frame *f, const Scene *s, int i, int *x,
                           int *y, int *w, int *h);
 int draw_text_width (const char *utf8);
+/* sizes the menu (w, h) and places its entries so it is at most max_h
+** tall: tighter rows first, then more columns */
+void menu_layout (Menu *m, int cell_w, int cell_h, int max_h);
 
 /* }================================================================== */
 

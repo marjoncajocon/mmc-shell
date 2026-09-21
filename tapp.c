@@ -483,7 +483,7 @@ static void menu_open (int x, int y) {
   static char titles[8][40];
   Menu *m = &A.menu;
   const Theme *cur = theme_find(A.cfg.theme), *next = theme_next(A.cfg.theme), *t;
-  int i, widest = 0, row = font_cell_h() + 10;
+  int i;
   memset(m, 0, sizeof(*m));
   menu_add("Copy", "Ctrl+Shift+C", M_COPY);
   menu_add("Paste", "Ctrl+Shift+V", M_PASTE);
@@ -511,14 +511,7 @@ static void menu_open (int x, int y) {
   menu_add("Blinking cursor", A.cfg.cursor_blink ? "\xE2\x9C\x93" : NULL, M_BLINK);
   menu_add(NULL, NULL, 0);
   menu_add("About " TERM_NAME, NULL, M_ABOUT);
-  m->h = 12;
-  for (i = 0; i < m->n; i++) {
-    int w = m->label[i] ? draw_text_width(m->label[i]) : 0;
-    if (m->label[i] && m->hint[i]) w += draw_text_width(m->hint[i]) + 3 * font_cell_w();
-    if (w > widest) widest = w;
-    m->h += m->label[i] ? row : 9;
-  }
-  m->w = widest + 32;
+  menu_layout(m, font_cell_w(), font_cell_h(), A.win_h - 8);
   m->x = (x + m->w + 8 > A.win_w) ? A.win_w - m->w - 8 : x;
   m->y = (y + m->h + 8 > A.win_h) ? A.win_h - m->h - 8 : y;
   if (m->x < 4) m->x = 4;
@@ -531,12 +524,11 @@ static void menu_open (int x, int y) {
 
 static int menu_hit (int x, int y) {
   const Menu *m = &A.menu;
-  int i, top = m->y + 6, row = font_cell_h() + 10;
-  if (x < m->x || x >= m->x + m->w) return -1;
+  int i;
   for (i = 0; i < m->n; i++) {
-    int h = m->label[i] ? row : 9;
-    if (y >= top && y < top + h) return m->label[i] ? i : -1;
-    top += h;
+    int ex = m->x + m->ix[i], ey = m->y + m->iy[i];
+    if (m->label[i] == NULL || m->ix[i] < 0) continue;
+    if (x >= ex && x < ex + m->colw && y >= ey && y < ey + m->row) return i;
   }
   return -1;
 }
