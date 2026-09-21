@@ -311,12 +311,13 @@ static void test_modes (void) {
 
 /* every palette color must be readable on the theme background */
 static void test_contrast (void) {
-  static const char *const names[] = {"dark", "light"};
+  const Theme *t;
   int k, i;
-  for (k = 0; k < 2; k++) {
-    const Theme *t = theme_find(names[k]);
+  for (k = 0; (t = theme_at(k)) != NULL; k++) {
     char what[64];
     check_int("fg contrast >= 7", theme_contrast(t->fg, t->bg) >= 7.0, 1);
+    check_int("selected text contrast >= 4.5", theme_contrast(t->fg, t->sel_bg) >= 4.5, 1);
+    check_int("menu text contrast >= 7", theme_contrast(t->ui_text, t->ui) >= 7.0, 1);
     for (i = 0; i < 16; i++) {
       double c = theme_contrast(t->pal[i], t->bg);
       /* "black" on dark and "white" on light are background-like on purpose */
@@ -325,10 +326,15 @@ static void test_contrast (void) {
       if (!t->dark && i == 7) { skip = 0; need = 3.0; }
       if (!t->dark && i == 15) skip = 0;
       if (skip) continue;
-      sprintf(what, "%s color%d contrast %.2f >= %.1f", names[k], i, c, need);
+      sprintf(what, "%s color%d contrast %.2f >= %.1f", t->name, i, c, need);
       check_int(what, c >= need, 1);
     }
   }
+  check_str("default is dark", theme_find("default")->name, "dark");
+  check_str("unknown theme is dark", theme_find("nope")->name, "dark");
+  check_str("gruv is gruvbox", theme_find("gruv")->name, "gruvbox");
+  check_str("dark -> green", theme_next("dark")->name, "green");
+  check_str("light -> dark (round)", theme_next("light")->name, "dark");
 }
 
 
@@ -474,7 +480,7 @@ static int render (const char *out, const char *theme_name, const char *font,
   m.label[0] = "Copy";        m.hint[0] = "Ctrl+Shift+C";
   m.label[1] = "Paste";       m.hint[1] = "Ctrl+Shift+V";
   m.label[2] = NULL;
-  m.label[3] = "Light theme"; m.hint[3] = "Ctrl+Shift+L";
+  m.label[3] = "Green theme"; m.hint[3] = "Ctrl+Shift+L";
   m.label[4] = "New window";  m.hint[4] = "Ctrl+Shift+N";
   m.label[5] = "About mmc-term";
   m.hot = 3;

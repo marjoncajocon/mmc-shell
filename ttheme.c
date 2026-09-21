@@ -1,8 +1,10 @@
 /*
 ** ttheme.c - themes and configuration of mmc-term
 **
-** Two built-in themes made from the mmc logo colors: navy #0B1220,
-** blue #2F9BFF, green #22D36B. The config file is "key=value" lines.
+** Built-in themes: the default dark one and a light one made from the
+** mmc logo colors (navy #0B1220, blue #2F9BFF, green #22D36B), plus
+** green, gruvbox (warm brown/orange) and red dark ones. Ctrl+Shift+L
+** goes through them in this order. The config file is "key=value" lines.
 */
 
 #include "mterm.h"
@@ -13,15 +15,39 @@
 #include <string.h>
 
 
+/* name, menu title, dark,
+   bg, fg, cursor, cursor_text, sel_bg, accent1, accent2, ui, ui_text,
+   color0 .. color15 */
 static const Theme themes[] = {
-  {"dark", 1,
+  {"dark", "Default", 1,
    0x0B1220, 0xE6EDF7, 0x22D36B, 0x0B1220, 0x1F4E80, 0x2F9BFF, 0x22D36B,
    0x16213A, 0xE6EDF7,
    {0x1C2940, 0xFF5C7A, 0x22D36B, 0xFFD166, 0x2F9BFF, 0xC792EA, 0x3DDBD9,
     0xC9D4E5,
     0x5C6F8F, 0xFF8FA3, 0x5DF2A0, 0xFFE29A, 0x7CC4FF, 0xDDB6F2, 0x7FEDEA,
     0xFFFFFF}},
-  {"light", 0,
+  {"green", "Green", 1,
+   0x0C1A12, 0xD8F5E0, 0x39E27D, 0x0C1A12, 0x1D5C36, 0x39E27D, 0xB5E35F,
+   0x132519, 0xD8F5E0,
+   {0x1A2E21, 0xFF6B6B, 0x39E27D, 0xE8DC6A, 0x5FB3F5, 0xD393F0, 0x4FE0C0,
+    0xC4DCCB,
+    0x5F8269, 0xFF9A9A, 0x7DF5A8, 0xF5EC9A, 0x96CFFF, 0xE6B8F7, 0x8AF0DA,
+    0xFFFFFF}},
+  {"gruvbox", "Gruvbox", 1,
+   0x282828, 0xEBDBB2, 0xFE8019, 0x282828, 0x504945, 0xFE8019, 0xFABD2F,
+   0x32302F, 0xEBDBB2,
+   {0x3C3836, 0xFB5A45, 0xB8BB26, 0xFABD2F, 0x83A598, 0xD3869B, 0x8EC07C,
+    0xD5C4A1,
+    0x928374, 0xFF7B6B, 0xD0D34A, 0xFFD467, 0xA3C4B8, 0xE8A6B8, 0xAAD69A,
+    0xFBF1C7}},
+  {"red", "Red", 1,
+   0x1A0B0E, 0xF5E1E3, 0xFF4D5E, 0x1A0B0E, 0x6B1E2A, 0xFF4D5E, 0xFF9F43,
+   0x251014, 0xF5E1E3,
+   {0x2E1519, 0xFF4D5E, 0x5FD38D, 0xFFC857, 0x6FA8FF, 0xE58FE0, 0x5FD8D8,
+    0xD9C2C5,
+    0x86666E, 0xFF8591, 0x8FEBB1, 0xFFDE94, 0xA3C8FF, 0xF2B8EE, 0x94EDED,
+    0xFFFFFF}},
+  {"light", "Light", 0,
    0xF3FBF7, 0x0B1220, 0x1565C0, 0xFFFFFF, 0xB9DDF7, 0x2F9BFF, 0x22D36B,
    0xFFFFFF, 0x0B1220,
    {0x0B1220, 0xC2253D, 0x0B7A3B, 0x8A5D00, 0x1565C0, 0x7B3FA0, 0x006F6D,
@@ -31,11 +57,30 @@ static const Theme themes[] = {
 };
 
 
+#define NTHEMES	((int)(sizeof(themes) / sizeof(themes[0])))
+
+
+/* the i-th built-in theme, NULL past the last one */
+const Theme *theme_at (int i) {
+  return (i >= 0 && i < NTHEMES) ? &themes[i] : NULL;
+}
+
+
+/* by name or title ("default" is "dark"); unknown names get the default */
 const Theme *theme_find (const char *name) {
-  size_t i;
-  for (i = 0; i < sizeof(themes) / sizeof(themes[0]); i++)
-    if (m_stricmp(themes[i].name, name) == 0) return &themes[i];
+  int i;
+  for (i = 0; i < NTHEMES; i++)
+    if (m_stricmp(themes[i].name, name) == 0 ||
+        m_stricmp(themes[i].title, name) == 0) return &themes[i];
+  if (m_stricmp(name, "gruv") == 0) return theme_find("gruvbox");
   return &themes[0];
+}
+
+
+/* the theme after this one, round and round */
+const Theme *theme_next (const char *name) {
+  const Theme *t = theme_find(name);
+  return &themes[(t - themes + 1) % NTHEMES];
 }
 
 

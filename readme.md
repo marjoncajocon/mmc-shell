@@ -87,7 +87,7 @@ Android has no `/tmp`). mmc-term needs X11 or Cocoa, so Android gets the shell.
 | `mterm.c` | `main` of mmc-term, command line |
 | `tgrid.c` | screen model: cells, cursor, scroll region, alternate screen, scrollback |
 | `tvt.c` | escape sequence (VT / xterm) parser |
-| `ttheme.c` | the dark and light themes, `mmcterm.conf` |
+| `ttheme.c` | the themes (dark, green, gruvbox, red, light), `mmcterm.conf` |
 | `tfont.c` | finds fonts, rasterizes and caches glyphs (uses `stb_truetype.h`) |
 | `tdraw.c` | software renderer: text, box drawing, cursor, selection, scrollbar, menu |
 | `tapp.c` | keys, mouse selection, clipboard, zoom, menu actions |
@@ -124,7 +124,7 @@ git-bash is bash inside the *mintty* window. mmc has its own window too:
 mmc-term                     the mmc shell, in the current folder
 mmc-term -e nvim notes.txt   another program instead of the shell
 mmc-term --hold -e ...       keep the window when the program ends
-mmc-term --theme light       dark or light, for this window only
+mmc-term --theme gruvbox     dark, green, gruvbox, red or light, for this window only
 mmc-term --font-size 11      text size in points, for this window only
 mmc-term --render-test a.bmp draw a sample into an image, no window
 ```
@@ -137,7 +137,7 @@ mmc-term --render-test a.bmp draw a sample into an image, no window
 | Ctrl + / Ctrl - / Ctrl 0, Ctrl+wheel | bigger, smaller, normal text |
 | Ctrl+Shift+T / Ctrl+Shift+W | new tab / close tab (closing the last one closes the window) |
 | Ctrl+Tab / Ctrl+Shift+Tab | next / previous tab (also: click a tab, or the wheel over the tabs) |
-| Ctrl+Shift+L | switch between the dark and the light theme (remembered) |
+| Ctrl+Shift+L | next theme: dark (default), green, gruvbox, red, light (remembered; the right-click menu lists them all) |
 | Ctrl+Shift+wheel | see-through window: opacity 30 .. 100 % in steps of 5 (remembered; also in the menu) |
 | F11 or Alt+Enter | full screen |
 | Ctrl+Shift+N | new window |

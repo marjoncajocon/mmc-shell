@@ -150,7 +150,8 @@ void vt_feed (Vt *vt, const char *buf, size_t n);
 */
 
 typedef struct Theme {
-  const char *name;
+  const char *name;	/* in mmcterm.conf and --theme */
+  const char *title;	/* in the menu */
   int dark;
   uint32_t bg, fg, cursor, cursor_text, sel_bg, accent1, accent2, ui, ui_text;
   uint32_t pal[16];
@@ -177,7 +178,9 @@ void config_defaults (Config *c);
 void config_load (Config *c, const char *native);
 void config_save_default (const char *native);
 void config_set_key (const char *native, const char *key, const char *value);
+const Theme *theme_at (int i);
 const Theme *theme_find (const char *name);
+const Theme *theme_next (const char *name);
 void theme_apply (Theme *out, const Theme *base, const Config *c);
 uint32_t theme_color (const Theme *t, uint32_t col, int is_fg);
 double theme_contrast (uint32_t a, uint32_t b);
@@ -233,7 +236,7 @@ typedef struct Frame {
   int w, h;
 } Frame;
 
-#define MENU_MAX	16
+#define MENU_MAX	24
 #define TAB_MAX	32
 
 typedef struct Menu {

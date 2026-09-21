@@ -14,9 +14,9 @@
 #include <string.h>
 
 
-enum { M_COPY = 1, M_PASTE, M_SELECT_ALL, M_THEME, M_BIGGER, M_SMALLER,
+enum { M_COPY = 1, M_PASTE, M_SELECT_ALL, M_BIGGER, M_SMALLER,
        M_MORE_CLEAR, M_LESS_CLEAR, M_NEW_TAB, M_RENAME_TAB, M_CLOSE_TAB,
-       M_NEW_WINDOW, M_ABOUT };
+       M_NEW_WINDOW, M_ABOUT, M_THEME /* + theme number, keep last */ };
 
 /* one shell with its own screen; the window shows one tab at a time */
 typedef struct Tab {
@@ -257,8 +257,8 @@ static void set_theme (const char *name, int save) {
 }
 
 
-static void toggle_theme (void) {
-  set_theme(A.theme.dark ? "light" : "dark", 1);
+static void next_theme (void) {
+  set_theme(theme_next(A.cfg.theme)->name, 1);
 }
 
 
@@ -406,7 +406,9 @@ static void menu_add (const char *label, const char *hint, int id) {
 
 
 static void menu_open (int x, int y) {
+  static char titles[8][40];
   Menu *m = &A.menu;
+  const Theme *cur = theme_find(A.cfg.theme), *next = theme_next(A.cfg.theme), *t;
   int i, widest = 0, row = font_cell_h() + 10;
   memset(m, 0, sizeof(*m));
   menu_add("Copy", "Ctrl+Shift+C", M_COPY);
@@ -418,7 +420,12 @@ static void menu_open (int x, int y) {
   menu_add("Close tab", "Ctrl+Shift+W", M_CLOSE_TAB);
   menu_add("New window", "Ctrl+Shift+N", M_NEW_WINDOW);
   menu_add(NULL, NULL, 0);
-  menu_add(A.theme.dark ? "Light theme" : "Dark theme", "Ctrl+Shift+L", M_THEME);
+  for (i = 0; i < 8 && (t = theme_at(i)) != NULL; i++) {	/* the current one ticked */
+    sprintf(titles[i], "%.20s theme", t->title);
+    menu_add(titles[i], t == cur ? "\xE2\x9C\x93" : t == next ? "Ctrl+Shift+L" : NULL,
+             M_THEME + i);
+  }
+  menu_add(NULL, NULL, 0);
   menu_add("Bigger text", "Ctrl +", M_BIGGER);
   menu_add("Smaller text", "Ctrl -", M_SMALLER);
   menu_add("More transparent", "Ctrl+Shift+wheel", M_MORE_CLEAR);
@@ -461,7 +468,6 @@ static void menu_do (int id) {
     case M_COPY: copy_selection(); break;
     case M_PASTE: win_request_paste(); break;
     case M_SELECT_ALL: select_all(); break;
-    case M_THEME: toggle_theme(); break;
     case M_BIGGER: zoom(1); break;
     case M_SMALLER: zoom(-1); break;
     case M_MORE_CLEAR: change_opacity(-5); break;
@@ -471,7 +477,10 @@ static void menu_do (int id) {
     case M_CLOSE_TAB: close_tab(A.cur); break;
     case M_NEW_WINDOW: new_window(); break;
     case M_ABOUT: about(); break;
-    default: break;
+    default:
+      if (id >= M_THEME && theme_at(id - M_THEME) != NULL)
+        set_theme(theme_at(id - M_THEME)->name, 1);
+      break;
   }
 }
 
@@ -583,7 +592,7 @@ static int shortcut (int key, int mods, uint32_t cp) {
     else if (cs && cp == 'N') new_window();
     else if (cs && cp == 'T') new_tab();
     else if (cs && cp == 'W') close_tab(A.cur);
-    else if (cs && cp == 'L') toggle_theme();
+    else if (cs && cp == 'L') next_theme();
     else if (cs && cp == 'A') select_all();
     else if ((mods & TM_CTRL) && (cp == '=' || cp == '+')) zoom(1);
     else if ((mods & TM_CTRL) && cp == '-') zoom(-1);
