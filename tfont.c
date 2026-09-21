@@ -12,6 +12,13 @@
 **                  program - this is what makes git-bash's mintty sharp
 **                  and smooth at small sizes. stb_truetype still decides
 **                  which font file has a glyph, GDI only draws it.
+**
+** Small text gets two helps on top (both fade out as the size grows):
+**   x-height snap  stb only: the vertical scale is nudged so the tops of
+**                  the lowercase letters land on a pixel edge instead of
+**                  smearing over two rows - FreeType's "light" hinting
+**   darkening      thin strokes are made a little heavier, the way macOS
+**                  and DirectWrite do it, so they don't fade into gray
 */
 
 #include "mterm.h"
@@ -46,7 +53,8 @@
 typedef struct Face {
   unsigned char *data;	/* the font file; shared by faces of one .ttc */
   stbtt_fontinfo info;
-  float scale;
+  float scale;	/* horizontal: the em size, untouched */
+  float scale_y;	/* vertical: x-height snapped to whole pixels */
   int ok;
 #ifdef _WIN32
   wchar_t family[LF_FACESIZE];	/* name GDI knows the font by */
@@ -585,16 +593,70 @@ static Slot *cache_insert (uint32_t key) {
 /* }================================================================== */
 
 
+/*
+** The scales of a face at 'px' pixels per em. With 'snap' the vertical
+** scale moves (by at most half a pixel of x-height) so the x-height is a
+** whole number of pixels: with the baseline on a pixel edge too, the
+** flat tops and bottoms of most lowercase letters come out sharp. Only
+** below 32 px; above, the blur of half a pixel does not show.
+*/
+static void face_scale (Face *f, float px, int snap) {
+  int x0, y0, x1, y1;
+  f->scale = f->scale_y = stbtt_ScaleForMappingEmToPixels(&f->info, px);
+  if (snap && px < 32.0f &&
+      stbtt_GetCodepointBox(&f->info, 'x', &x0, &y0, &x1, &y1) && y1 > 0) {
+    float xh = (float)y1 * f->scale;
+    float want = (float)floor(xh + 0.5f);
+    if (want < 1.0f) want = 1.0f;
+    f->scale_y = f->scale * want / xh;
+  }
+}
+
+
+/*
+** How much heavier small text gets: full strength at 11 px per em (8 pt)
+** and below, none from 22 px (16 pt) up. GDI's hinted strokes are already
+** firm, so they get half.
+*/
+static float darkening (void) {
+  float k = (22.0f - cur_px) / 11.0f;
+  if (k <= 0.0f) return 0.0f;
+  if (k > 1.0f) k = 1.0f;
+  return use_gdi() ? 0.5f * k : 0.8f * k;
+}
+
+
+/*
+** Raises the coverage of partly covered pixels (full and empty ones stay):
+** c' = c (1 + k) / (1 + k c), the "enhanced contrast" curve of
+** DirectWrite. A one pixel stem at 60% becomes ~75%.
+*/
+static void darken (Glyph *g) {
+  unsigned char lut[256];
+  float k = darkening();
+  size_t n, i;
+  if (g->bm == NULL || k <= 0.0f) return;
+  for (i = 0; i < 256; i++) {
+    float c = (float)i / 255.0f;
+    lut[i] = (unsigned char)(c * (1.0f + k) / (1.0f + k * c) * 255.0f + 0.5f);
+  }
+  n = (size_t)g->w * (size_t)g->h * (g->lcd == 1 ? 3u : 1u);
+  for (i = 0; i < n; i++) g->bm[i] = lut[g->bm[i]];
+}
+
+
 static void stb_metrics (void) {
   int asc, desc, gap, adv, lsb;
-  float s = f_regular.scale, height;
+  float s = f_regular.scale_y, height;
   stbtt_GetFontVMetrics(&f_regular.info, &asc, &desc, &gap);
   stbtt_GetCodepointHMetrics(&f_regular.info, 'M', &adv, &lsb);
   height = (float)(asc - desc + gap) * s;
+  s = f_regular.scale;
   cell_h = (int)ceil(height * 1.08f);	/* a little air between lines */
   cell_w = (int)floor((float)adv * s + 0.5f);
   if (cell_w < 1) cell_w = 1;
-  ascent = (int)floor((float)asc * s + ((float)cell_h - height) * 0.5f + 0.5f);
+  ascent = (int)floor((float)asc * f_regular.scale_y +
+                      ((float)cell_h - height) * 0.5f + 0.5f);
 }
 
 
@@ -604,13 +666,11 @@ void font_set_px (float px) {
   cur_px = px;
   cache_clear();
   if (!f_regular.ok) return;
-  f_regular.scale = stbtt_ScaleForMappingEmToPixels(&f_regular.info, px);
-  if (f_bold.ok) f_bold.scale = stbtt_ScaleForMappingEmToPixels(&f_bold.info, px);
-  if (f_italic.ok)
-    f_italic.scale = stbtt_ScaleForMappingEmToPixels(&f_italic.info, px);
+  face_scale(&f_regular, px, 1);
+  if (f_bold.ok) face_scale(&f_bold, px, 1);
+  if (f_italic.ok) face_scale(&f_italic, px, 1);
   for (i = 0; i < MAX_FALLBACK; i++)
-    if (f_fallback[i].ok)
-      f_fallback[i].scale = stbtt_ScaleForMappingEmToPixels(&f_fallback[i].info, px);
+    if (f_fallback[i].ok) face_scale(&f_fallback[i], px, 0);
 #ifdef _WIN32
   face_drop_gdi(&f_regular);
   face_drop_gdi(&f_bold);
@@ -631,7 +691,7 @@ static Face *fallback_for (uint32_t cp, int *glyph) {
     Face *f = &f_fallback[i];
     if (fallback_state[i] == 0) {	/* loaded the first time they are needed */
       fallback_state[i] = face_load(f, find_file(fallback_files[i]), 0) ? 1 : -1;
-      if (f->ok) f->scale = stbtt_ScaleForMappingEmToPixels(&f->info, cur_px);
+      if (f->ok) face_scale(f, cur_px, 0);
     }
     if (f->ok && (*glyph = stbtt_FindGlyphIndex(&f->info, (int)cp)) != 0)
       return f;
@@ -731,11 +791,13 @@ const Glyph *font_glyph (uint32_t cp, int bold, int italic, int dark) {
     Face *gf = (f == &f_bold || f == &f_italic) ? &f_regular : f;
     int style = (bold ? ST_BOLD : 0) | (italic ? ST_ITALIC : 0);
     if (gf->family[0] != L'\0' &&
-        gdi_glyph(gf, cp, style, dark, fallback ? span : 0, g))
+        gdi_glyph(gf, cp, style, dark, fallback ? span : 0, g)) {
+      darken(g);
       return g;
+    }
   }
 #endif
-  stbtt_GetGlyphBitmapBox(&f->info, glyph, f->scale, f->scale, &x0, &y0, &x1, &y1);
+  stbtt_GetGlyphBitmapBox(&f->info, glyph, f->scale, f->scale_y, &x0, &y0, &x1, &y1);
   g->w = x1 - x0;
   g->h = y1 - y0;
   g->xoff = x0;
@@ -745,7 +807,7 @@ const Glyph *font_glyph (uint32_t cp, int bold, int italic, int dark) {
     return g;
   }
   g->bm = (unsigned char *)xmalloc((size_t)g->w * (size_t)g->h);
-  stbtt_MakeGlyphBitmap(&f->info, g->bm, g->w, g->h, g->w, f->scale, f->scale,
+  stbtt_MakeGlyphBitmap(&f->info, g->bm, g->w, g->h, g->w, f->scale, f->scale_y,
                         glyph);
   if (fallback) {	/* a fallback font is not monospace: center it in its cell(s) */
     stbtt_GetGlyphHMetrics(&f->info, glyph, &adv, &lsb);
@@ -753,5 +815,6 @@ const Glyph *font_glyph (uint32_t cp, int bold, int italic, int dark) {
   }
   if (fake_bold) embolden(g);
   if (fake_italic) slant(g);
+  darken(g);
   return g;
 }

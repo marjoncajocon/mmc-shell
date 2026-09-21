@@ -186,7 +186,11 @@ hinted to the pixel grid and ClearType filtered, like in every other Windows
 program - this is what makes git-bash's window sharp at small sizes, and
 mmc-term does the same (`font_smoothing=cleartype`, the default; `gray` is
 the same without the colored edges; `stb` is the built-in rasterizer that
-Linux and macOS use). Powerline arrows, rounds and slants (U+E0B0..E0BF), box
+Linux and macOS use). Small text gets two more helps, fading out by 16 pt:
+thin strokes are darkened a little (like macOS and DirectWrite do), so they
+don't fade to gray, and the built-in rasterizer snaps the x-height to whole
+pixels, so the tops of the lowercase letters are sharp instead of smeared
+over two rows (FreeType's "light" hinting). Powerline arrows, rounds and slants (U+E0B0..E0BF), box
 drawing and block characters are drawn as geometry, so they fill their cells
 exactly and prompt segments join without seams at every size and zoom.
 

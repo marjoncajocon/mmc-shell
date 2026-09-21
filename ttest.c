@@ -3,7 +3,8 @@
 **
 **   ttest                   run the checks
 **   ttest replay FILE       feed a captured terminal stream, print the screen
-**   ttest render OUT.bmp [light|dark]   draw a sample screen to an image
+**   ttest render OUT.bmp [light|dark] [FONT|-] [POINTS] [cleartype|gray|stb]
+**                                       draw a sample screen to an image
 */
 
 #include "mterm.h"
@@ -422,7 +423,8 @@ static const char *const demo =
   "\033[32m$\033[0m echo selected text here";
 
 
-static int render (const char *out, const char *theme_name, const char *font) {
+static int render (const char *out, const char *theme_name, const char *font,
+                   int size, const char *smooth) {
   Config c;
   Theme th;
   Grid *g;
@@ -432,7 +434,12 @@ static int render (const char *out, const char *theme_name, const char *font) {
   Menu m;
   int i;
   config_defaults(&c);
-  if (font != NULL) strncpy(c.font, font, sizeof(c.font) - 1);
+  if (font != NULL && strcmp(font, "-") != 0)
+    strncpy(c.font, font, sizeof(c.font) - 1);
+  if (size > 0) c.font_size = size;
+  if (smooth != NULL)
+    c.smoothing = strcmp(smooth, "stb") == 0 ? SMOOTH_STB :
+                  strcmp(smooth, "gray") == 0 ? SMOOTH_GRAY : SMOOTH_CLEARTYPE;
   if (font_init(&c) != 0) {
     printf("no font found\n");
     return 1;
@@ -488,7 +495,8 @@ static int render (const char *out, const char *theme_name, const char *font) {
 int main (int argc, char **argv) {
   if (argc >= 3 && strcmp(argv[1], "replay") == 0) return replay(argv[2]);
   if (argc >= 3 && strcmp(argv[1], "render") == 0)
-    return render(argv[2], argc > 3 ? argv[3] : "dark", argc > 4 ? argv[4] : NULL);
+    return render(argv[2], argc > 3 ? argv[3] : "dark", argc > 4 ? argv[4] : NULL,
+                  argc > 5 ? atoi(argv[5]) : 0, argc > 6 ? argv[6] : NULL);
   test_core();
   test_modes();
   test_contrast();
