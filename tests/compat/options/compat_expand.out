@@ -1,0 +1,71 @@
+== 31
+dq yes
+sq yes
+bs yes
+var yes
+bare var yes
+1 a'X'c
+2 a"X"c
+3 a"X"c
+4 aXc
+5 a\c
+6 a\Qc
+7 abc a[b]c a&c
+8 a<b>c a"<b>"c
+== 32
+dq no
+sq no
+bs no
+var no
+bare var yes
+1 a'X'c
+2 a"X"c
+3 a"X"c
+4 aXc
+5 a\c
+6 a\Qc
+7 abc a[b]c a&c
+8 a<b>c a"<b>"c
+== 42
+dq no
+sq no
+bs no
+var no
+bare var yes
+1 a'X'c
+2 a"X"c
+3 a"X"c
+4 aXc
+5 a\c
+6 a\Qc
+7 abc a[b]c a&c
+8 a<b>c a"<b>"c
+== 43
+dq no
+sq no
+bs no
+var no
+bare var yes
+1 aXc
+2 a"X"c
+3 aXc
+4 aXc
+5 a\c
+6 aQc
+7 abc a[b]c a&c
+8 a<b>c a<&>c
+== 52
+dq no
+sq no
+bs no
+var no
+bare var yes
+1 aXc
+2 a"X"c
+3 aXc
+4 aXc
+5 a\c
+6 aQc
+7 abc a[b]c a&c
+8 a<b>c a<&>c
+status: 0

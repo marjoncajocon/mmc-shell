@@ -52,7 +52,9 @@
 
 typedef struct Face {
   unsigned char *data;	/* the font file; shared by faces of one .ttc */
+  size_t len;	/* bytes in data */
   stbtt_fontinfo info;
+  OtFace ot;	/* ligatures, colors: what stb_truetype does not read */
   float scale;	/* horizontal: the em size, untouched */
   float scale_y;	/* vertical: x-height snapped to whole pixels */
   int ok;
@@ -69,6 +71,10 @@ typedef struct Known {
 
 /* a name may appear twice: the first entry whose file exists wins */
 static const Known known[] = {
+  {"JetBrains Mono", "JetBrainsMonoNerdFontMono-Regular.ttf",
+   "JetBrainsMonoNerdFontMono-Bold.ttf", "JetBrainsMonoNerdFontMono-Italic.ttf", 0, 0},
+  {"JetBrains Mono Nerd Font Mono", "JetBrainsMonoNerdFontMono-Regular.ttf",
+   "JetBrainsMonoNerdFontMono-Bold.ttf", "JetBrainsMonoNerdFontMono-Italic.ttf", 0, 0},
   {"Hack", "HackNerdFontMono-Regular.ttf", "HackNerdFontMono-Bold.ttf",
    "HackNerdFontMono-Italic.ttf", 0, 0},
   {"Hack", "Hack-Regular.ttf", "Hack-Bold.ttf", "Hack-Italic.ttf", 0, 0},
@@ -95,11 +101,12 @@ static const Known known[] = {
   {NULL, NULL, NULL, NULL, 0, 0}
 };
 
-/* looked at in this order when the config names no font; Hack (the Nerd
-** Font version, with the Powerline and icon glyphs) comes with mmc in
-** usr/share/fonts, the others are what each system has */
+/* looked at in this order when the config names no font; JetBrains Mono
+** (the Nerd Font version, with ligatures and the Powerline and icon
+** glyphs) comes with mmc in usr/share/fonts, the others are what each
+** system has */
 static const char *const preferred[] = {
-  "Hack",
+  "JetBrains Mono", "Hack",
 #if defined(_WIN32)
   "Cascadia Mono", "Cascadia Code", "Consolas", "Lucida Console",
 #elif defined(__APPLE__)
@@ -107,13 +114,13 @@ static const char *const preferred[] = {
 #else
   "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Ubuntu Mono",
 #endif
-  "JetBrains Mono", "Courier New", NULL
+  "Courier New", NULL
 };
 
 /* fonts asked for glyphs the main font does not have; the Nerd Font
 ** first, so the icons work whatever the main font is */
 static const char *const fallback_files[] = {
-  "HackNerdFontMono-Regular.ttf",
+  "JetBrainsMonoNerdFontMono-Regular.ttf",
 #if defined(_WIN32)
   "seguisym.ttf", "segoeui.ttf", "msgothic.ttc", "malgun.ttf", "msyh.ttc",
   "seguiemj.ttf",
@@ -129,16 +136,33 @@ static const char *const fallback_files[] = {
 
 #define MAX_FALLBACK	8
 
+/* color emoji: COLR layers (Windows), CBDT pictures (Linux), sbix
+** (macOS); the first one there with colors is used */
+static const char *const emoji_files[] = {
+#if defined(_WIN32)
+  "seguiemj.ttf",
+#elif defined(__APPLE__)
+  "Apple Color Emoji.ttc",
+#else
+  "NotoColorEmoji.ttf", "NotoColorEmoji-Regular.ttf", "Twemoji.Mozilla.ttf",
+#endif
+  NULL
+};
+
 static Vec font_files;	/* every font file found on the system */
 static int files_listed = 0;
 static char *extra_dir = NULL;
 static Face f_regular, f_bold, f_italic;
 static Face f_fallback[MAX_FALLBACK];
 static int fallback_state[MAX_FALLBACK];	/* 0 not tried, 1 loaded, -1 none */
+static Face f_emoji;
+static int emoji_state = 0;	/* 0 not tried, 1 loaded, -1 none */
 static char name_buf[160];
 static float cur_px = 15.0f;
 static int cell_w = 8, cell_h = 16, ascent = 12;
 static int smoothing = SMOOTH_STB;
+static int use_ligatures = 1;
+static float emoji_scale = 0.0f;	/* COLR emoji, for this cell size; 0: not yet */
 
 
 /*
@@ -348,17 +372,21 @@ static int gdi_metrics (void) {
 /*
 ** Draws one glyph with GDI and reads the coverage back. Light text is
 ** drawn white on black, dark text black on white (and inverted): GDI
-** tunes ClearType for the colors, so both come out right.
+** tunes ClearType for the colors, so both come out right. gid >= 0: that
+** glyph of the font, not a character (a ligature; it may reach several
+** cells to the left).
 */
-static int gdi_glyph (Face *f, uint32_t cp, int style, int dark, int span,
+static int gdi_glyph (Face *f, uint32_t cp, int gid, int style, int dark, int span,
                       Glyph *g) {
   wchar_t wc[2];
-  int n = 1, pad = cell_h, w = cell_w * 2 + 2 * pad, h = cell_h + 2 * pad;
+  int n = 1, pad = cell_h, padx = gid >= 0 ? cell_w * 6 : cell_h;
+  int w = cell_w * 2 + 2 * padx, h = cell_h + 2 * pad;
   int x0 = w, y0 = h, x1 = -1, y1 = -1, x, y, x_at;
   uint32_t paper = dark ? 0xFFFFFFu : 0u;
   HFONT hf = face_hfont(f, style);
   if (hf == NULL || !canvas(w, h)) return 0;
-  if (cp >= 0x10000) {	/* UTF-16 surrogate pair */
+  if (gid >= 0) wc[0] = (wchar_t)gid;
+  else if (cp >= 0x10000) {	/* UTF-16 surrogate pair */
     wc[0] = (wchar_t)(0xD800 + ((cp - 0x10000) >> 10));
     wc[1] = (wchar_t)(0xDC00 + ((cp - 0x10000) & 0x3FF));
     n = 2;
@@ -368,12 +396,13 @@ static int gdi_glyph (Face *f, uint32_t cp, int style, int dark, int span,
     for (x = 0; x < w; x++) gbits[(size_t)y * (size_t)gw + (size_t)x] = paper;
   SelectObject(gdc, hf);
   SetTextColor(gdc, dark ? RGB(0, 0, 0) : RGB(255, 255, 255));
-  x_at = pad;
+  x_at = padx;
   if (span > 0) {	/* a fallback font is not monospace: center it */
     SIZE sz;
     if (GetTextExtentPoint32W(gdc, wc, n, &sz)) x_at += (span - sz.cx) / 2;
   }
-  ExtTextOutW(gdc, x_at, pad + ascent, 0, NULL, wc, (UINT)n, NULL);
+  ExtTextOutW(gdc, x_at, pad + ascent, gid >= 0 ? ETO_GLYPH_INDEX : 0, NULL, wc,
+              (UINT)n, NULL);
   GdiFlush();
   for (y = 0; y < h; y++) {
     const uint32_t *row = gbits + (size_t)y * (size_t)gw;
@@ -389,7 +418,7 @@ static int gdi_glyph (Face *f, uint32_t cp, int style, int dark, int span,
   if (x1 < 0) return 1;	/* a space */
   g->w = x1 - x0 + 1;
   g->h = y1 - y0 + 1;
-  g->xoff = x0 - pad;
+  g->xoff = x0 - padx;
   g->yoff = y0 - (pad + ascent);
   g->lcd = (smoothing == SMOOTH_CLEARTYPE) ? 1 : 2;
   g->bm = (unsigned char *)xmalloc((size_t)g->w * (size_t)g->h * (g->lcd == 1 ? 3u : 1u));
@@ -410,6 +439,25 @@ static int gdi_glyph (Face *f, uint32_t cp, int style, int dark, int span,
   return 1;
 }
 
+/*
+** Does GDI draw this style from the very file f was read from? Only then
+** are its glyph numbers ours (a family may have an italic file of its
+** own that we did not find, with other glyphs). -1: not asked yet.
+*/
+static int same_file[4] = {-1, -1, -1, -1};
+
+static int gdi_same_file (Face *f, int style) {
+  HFONT hf;
+  DWORD n;
+  if (same_file[style] >= 0) return same_file[style];
+  same_file[style] = 0;
+  if ((hf = face_hfont(&f_regular, style)) == NULL || !canvas(8, 8)) return 0;
+  SelectObject(gdc, hf);
+  n = GetFontData(gdc, 0, 0, NULL, 0);
+  same_file[style] = (n != GDI_ERROR && (size_t)n == f->len);
+  return same_file[style];
+}
+
 /* }================================================================== */
 
 #else
@@ -419,12 +467,52 @@ static int use_gdi (void) { return 0; }
 #endif
 
 
-static int face_open (Face *f, unsigned char *data, int index) {
+/*
+** A font of pictures only (Noto Color Emoji has no outlines, which
+** stb_truetype wants): enough of it for the cmap and the metrics. Its
+** outlines read as empty (a loca format that does not exist).
+*/
+static int picture_font_init (stbtt_fontinfo *info, unsigned char *data, int off) {
+  stbtt_uint32 cmap, maxp;
+  int i, n;
+  memset(info, 0, sizeof(*info));
+  info->data = data;
+  info->fontstart = off;
+  cmap = stbtt__find_table(data, (stbtt_uint32)off, "cmap");
+  info->head = (int)stbtt__find_table(data, (stbtt_uint32)off, "head");
+  info->hhea = (int)stbtt__find_table(data, (stbtt_uint32)off, "hhea");
+  info->hmtx = (int)stbtt__find_table(data, (stbtt_uint32)off, "hmtx");
+  if (!cmap || !info->head || !info->hhea || !info->hmtx) return 0;
+  if (!stbtt__find_table(data, (stbtt_uint32)off, "CBDT") &&
+      !stbtt__find_table(data, (stbtt_uint32)off, "sbix"))
+    return 0;
+  maxp = stbtt__find_table(data, (stbtt_uint32)off, "maxp");
+  info->numGlyphs = maxp ? ttUSHORT(data + maxp + 4) : 0xFFFF;
+  info->svg = -1;
+  info->indexToLocFormat = 2;
+  n = ttUSHORT(data + cmap + 2);
+  for (i = 0; i < n; i++) {	/* Unicode, the full one when there is one */
+    stbtt_uint32 rec = cmap + 4 + 8 * (stbtt_uint32)i;
+    int pid = ttUSHORT(data + rec), eid = ttUSHORT(data + rec + 2);
+    if (pid == 0 || (pid == 3 && (eid == 1 || eid == 10))) {
+      info->index_map = (int)(cmap + ttULONG(data + rec + 4));
+      if ((pid == 3 && eid == 10) || (pid == 0 && eid >= 4)) break;
+    }
+  }
+  return info->index_map != 0;
+}
+
+
+static int face_open (Face *f, unsigned char *data, size_t len, int index) {
   int off = stbtt_GetFontOffsetForIndex(data, index);
   memset(f, 0, sizeof(*f));
-  if (off < 0 || !stbtt_InitFont(&f->info, data, off)) return 0;
+  if (off < 0) return 0;
+  if (!stbtt_InitFont(&f->info, data, off) && !picture_font_init(&f->info, data, off))
+    return 0;
   f->data = data;
+  f->len = len;
   f->ok = 1;
+  ot_open(&f->ot, data, len, off);
   return 1;
 }
 
@@ -439,7 +527,7 @@ static int face_load (Face *f, const char *file, int index) {
     free(data);
     return 0;
   }
-  if (!face_open(f, data, index)) {
+  if (!face_open(f, data, len, index)) {
     free(data);
     return 0;
   }
@@ -453,9 +541,9 @@ static int face_load (Face *f, const char *file, int index) {
 static int load_known (const Known *k) {
   const char *file = find_file(k->regular);
   if (!face_load(&f_regular, file, 0)) return 0;
-  if (k->ttc_bold) face_open(&f_bold, f_regular.data, k->ttc_bold);
+  if (k->ttc_bold) face_open(&f_bold, f_regular.data, f_regular.len, k->ttc_bold);
   else face_load(&f_bold, find_file(k->bold), 0);
-  if (k->ttc_italic) face_open(&f_italic, f_regular.data, k->ttc_italic);
+  if (k->ttc_italic) face_open(&f_italic, f_regular.data, f_regular.len, k->ttc_italic);
   else face_load(&f_italic, find_file(k->italic), 0);
 #ifdef _WIN32
   if (k->ttc_bold) face_family(&f_bold);	/* faces inside a .ttc */
@@ -483,14 +571,40 @@ static int is_known_name (const char *name) {
 }
 
 
+static void cache_clear (void);
+
+
+/* the fonts of an earlier font_init go */
+static void faces_free (void) {
+  Face *faces[3];
+  int i;
+  faces[0] = &f_regular;
+  faces[1] = &f_bold;
+  faces[2] = &f_italic;
+  for (i = 2; i >= 0; i--) {	/* the regular one last: a .ttc shares its data */
+    Face *f = faces[i];
+    if (!f->ok) continue;
+#ifdef _WIN32
+    face_drop_gdi(f);
+#endif
+    ot_close(&f->ot);
+    if (i == 0 || f->data != f_regular.data) free(f->data);
+  }
+  for (i = 0; i < 3; i++) memset(faces[i], 0, sizeof(Face));
+  cache_clear();
+}
+
+
 int font_init (const Config *c) {
   size_t i;
+  faces_free();
   name_buf[0] = '\0';
 #ifdef _WIN32
   smoothing = c->smoothing;
 #else
   smoothing = SMOOTH_STB;
 #endif
+  use_ligatures = c->ligatures;
   if (c->font_file[0] != '\0') {	/* an explicit file wins */
     char *native = path_to_native(c->font_file);
     int ok = face_load(&f_regular, native, 0);
@@ -555,8 +669,12 @@ static Slot *slots = NULL;
 static size_t nslots = 0, nused = 0;
 
 
+static void clusters_clear (void);
+
+
 static void cache_clear (void) {
   size_t i;
+  clusters_clear();
   for (i = 0; i < nslots; i++) free(slots[i].g.bm);
   free(slots);
   slots = NULL;
@@ -665,6 +783,7 @@ void font_set_px (float px) {
   if (px < 6.0f) px = 6.0f;
   cur_px = px;
   cache_clear();
+  emoji_scale = 0.0f;
   if (!f_regular.ok) return;
   face_scale(&f_regular, px, 1);
   if (f_bold.ok) face_scale(&f_bold, px, 1);
@@ -672,6 +791,7 @@ void font_set_px (float px) {
   for (i = 0; i < MAX_FALLBACK; i++)
     if (f_fallback[i].ok) face_scale(&f_fallback[i], px, 0);
 #ifdef _WIN32
+  for (i = 0; i < 4; i++) same_file[i] = -1;
   face_drop_gdi(&f_regular);
   face_drop_gdi(&f_bold);
   face_drop_gdi(&f_italic);
@@ -747,13 +867,335 @@ static void slant (Glyph *g) {
 }
 
 
+/*
+** Glyph 'glyph' of face f into g. GDI draws it when it is on (the code
+** point cp, or the glyph itself when by_id), else stb_truetype.
+** fallback: f is not the main font, center it in 'span'.
+*/
+static void render (Glyph *g, Face *f, int glyph, uint32_t cp, int by_id, int bold,
+                    int italic, int fake_bold, int fake_italic, int fallback,
+                    int dark, int span) {
+  int x0, y0, x1, y1, adv, lsb;
+#ifdef _WIN32
+  if (use_gdi()) {
+    /* GDI picks the bold/italic file of the family itself, or makes it */
+    Face *gf = (f == &f_bold || f == &f_italic) ? &f_regular : f;
+    int style = (bold ? ST_BOLD : 0) | (italic ? ST_ITALIC : 0);
+    if (gf->family[0] != L'\0' &&
+        gdi_glyph(gf, cp, by_id ? glyph : -1, style, dark, fallback ? span : 0, g)) {
+      darken(g);
+      return;
+    }
+  }
+#else
+  (void)cp; (void)by_id; (void)bold; (void)italic; (void)dark;
+#endif
+  stbtt_GetGlyphBitmapBox(&f->info, glyph, f->scale, f->scale_y, &x0, &y0, &x1, &y1);
+  g->w = x1 - x0;
+  g->h = y1 - y0;
+  g->xoff = x0;
+  g->yoff = y0;
+  if (g->w <= 0 || g->h <= 0) {
+    g->w = g->h = 0;
+    return;
+  }
+  g->bm = (unsigned char *)xmalloc((size_t)g->w * (size_t)g->h);
+  stbtt_MakeGlyphBitmap(&f->info, g->bm, g->w, g->h, g->w, f->scale, f->scale_y,
+                        glyph);
+  if (fallback) {	/* a fallback font is not monospace: center it in its cell(s) */
+    stbtt_GetGlyphHMetrics(&f->info, glyph, &adv, &lsb);
+    g->xoff += (span - (int)((float)adv * f->scale)) / 2;
+  }
+  if (fake_bold) embolden(g);
+  if (fake_italic) slant(g);
+  darken(g);
+}
+
+
+/*
+** {==================================================================
+** Color emoji
+** ===================================================================
+*/
+
+static Face *emoji_face (void) {
+  int i;
+  if (emoji_state != 0) return emoji_state > 0 ? &f_emoji : NULL;
+  emoji_state = -1;
+  for (i = 0; emoji_files[i] != NULL && emoji_state < 0; i++) {
+    if (!face_load(&f_emoji, find_file(emoji_files[i]), 0)) continue;
+    if ((f_emoji.ot.colr != 0 && f_emoji.ot.cpal != 0) || f_emoji.ot.cbdt != 0 ||
+        f_emoji.ot.sbix != 0)
+      emoji_state = 1;
+  }
+  return emoji_state > 0 ? &f_emoji : NULL;
+}
+
+
+/* shown as a color picture by itself: the wide pictographs */
+static int emoji_presentation (uint32_t cp) {
+  return grid_wcwidth(cp) == 2 &&
+         ((cp >= 0x1F000 && cp <= 0x1FAFF) || (cp >= 0x2300 && cp <= 0x2BFF));
+}
+
+
+/* premultiplied 0xAARRGGBB back to plain */
+static uint32_t unpremultiply (uint32_t a, uint32_t r, uint32_t g, uint32_t b) {
+  if (a == 0) return 0;
+  r = r * 255 / a;
+  g = g * 255 / a;
+  b = b * 255 / a;
+  return (a << 24) | ((r > 255 ? 255 : r) << 16) | ((g > 255 ? 255 : g) << 8) |
+         (b > 255 ? 255 : b);
+}
+
+
+/* the box of a glyph's layers in font units, placed at pen x; 0: none */
+static int layers_box (Face *f, int gid, int pen, int *x0, int *y0, int *x1, int *y1) {
+  int first, n = ot_color_layers(&f->ot, gid, &first), k, any = 0;
+  for (k = 0; k < n; k++) {
+    int lg, pal, a0, b0, a1, b1;
+    ot_layer(&f->ot, first + k, &lg, &pal);
+    if (!stbtt_GetGlyphBox(&f->info, lg, &a0, &b0, &a1, &b1) || a1 <= a0) continue;
+    if (a0 + pen < *x0) *x0 = a0 + pen;
+    if (b0 < *y0) *y0 = b0;
+    if (a1 + pen > *x1) *x1 = a1 + pen;
+    if (b1 > *y1) *y1 = b1;
+    any = 1;
+  }
+  return any;
+}
+
+
+/*
+** COLR: the layers of the glyphs painted one over the other, each an
+** outline in a color of the palette; the glyphs side by side at their
+** advances (a family is people standing close). Every emoji gets the
+** same size - the size that fits 😀 into two cells - unless it would not
+** fit; the drawing is centered in its cells.
+*/
+static int layers_glyph (Face *f, const uint16_t *gl, int m, int span, Glyph *g) {
+  int x0 = 1 << 20, y0 = 1 << 20, x1 = -(1 << 20), y1 = -(1 << 20), k, pen, w, h;
+  int ox, oy, adv, lsb;
+  float s;
+  uint32_t *acc, *out;
+  if (emoji_scale == 0.0f) {	/* the size of all of them, from 😀 */
+    int r0 = 1 << 20, q0 = 1 << 20, r1 = -(1 << 20), q1 = -(1 << 20);
+    int ref = stbtt_FindGlyphIndex(&f->info, 0x1F600);
+    emoji_scale = stbtt_ScaleForMappingEmToPixels(&f->info, (float)cell_h);
+    if (ref != 0 && layers_box(f, ref, 0, &r0, &q0, &r1, &q1)) {
+      float sw = (float)(cell_w * 2) * 0.92f / (float)(r1 - r0);
+      float sh = (float)cell_h * 0.86f / (float)(q1 - q0);
+      emoji_scale = sw < sh ? sw : sh;
+    }
+  }
+  for (k = 0, pen = 0; k < m; k++) {
+    layers_box(f, gl[k], pen, &x0, &y0, &x1, &y1);
+    stbtt_GetGlyphHMetrics(&f->info, gl[k], &adv, &lsb);
+    pen += adv;
+  }
+  if (x1 <= x0 || y1 <= y0) return 0;
+  s = emoji_scale;
+  if ((float)(x1 - x0) * s > (float)span) s = (float)span / (float)(x1 - x0);
+  if ((float)(y1 - y0) * s > (float)cell_h) s = (float)cell_h / (float)(y1 - y0);
+  ox = (int)floor((float)x0 * s);	/* the picture's corner in pixels */
+  oy = (int)floor((float)-y1 * s);
+  w = (int)ceil((float)x1 * s) - ox + 1;
+  h = (int)ceil((float)-y0 * s) - oy + 1;
+  acc = (uint32_t *)xmalloc((size_t)w * (size_t)h * sizeof(uint32_t) * 4);
+  memset(acc, 0, (size_t)w * (size_t)h * sizeof(uint32_t) * 4);
+  for (k = 0, pen = 0; k < m; k++) {
+    int first, n = ot_color_layers(&f->ot, gl[k], &first), j;
+    float shift = (float)pen * s;
+    for (j = 0; j < n; j++) {	/* over: premultiplied a, r, g, b per pixel */
+      int lg, pal, a0, b0, a1, b1, x, y, bw, bh;
+      uint32_t color, ca, cr, cg, cb;
+      unsigned char *cov;
+      ot_layer(&f->ot, first + j, &lg, &pal);
+      stbtt_GetGlyphBitmapBoxSubpixel(&f->info, lg, s, s, shift - (float)floor(shift), 0.0f,
+                                      &a0, &b0, &a1, &b1);
+      bw = a1 - a0;
+      bh = b1 - b0;
+      if (bw <= 0 || bh <= 0) continue;
+      cov = (unsigned char *)xmalloc((size_t)bw * (size_t)bh);
+      stbtt_MakeGlyphBitmapSubpixel(&f->info, cov, bw, bh, bw, s, s,
+                                    shift - (float)floor(shift), 0.0f, lg);
+      a0 += (int)floor(shift) - ox;
+      b0 -= oy;
+      color = ot_palette(&f->ot, pal, 0xFFFFFFu);
+      ca = color >> 24;
+      cr = (color >> 16) & 0xFF;
+      cg = (color >> 8) & 0xFF;
+      cb = color & 0xFF;
+      for (y = 0; y < bh; y++)
+        for (x = 0; x < bw; x++) {
+          uint32_t c = cov[(size_t)y * (size_t)bw + (size_t)x], a, *p;
+          if (c == 0 || x + a0 < 0 || x + a0 >= w || y + b0 < 0 || y + b0 >= h) continue;
+          a = ca * c / 255;
+          p = acc + ((size_t)(y + b0) * (size_t)w + (size_t)(x + a0)) * 4;
+          p[0] = a + p[0] * (255 - a) / 255;
+          p[1] = cr * a / 255 + p[1] * (255 - a) / 255;
+          p[2] = cg * a / 255 + p[2] * (255 - a) / 255;
+          p[3] = cb * a / 255 + p[3] * (255 - a) / 255;
+        }
+      free(cov);
+    }
+    stbtt_GetGlyphHMetrics(&f->info, gl[k], &adv, &lsb);
+    pen += adv;
+  }
+  out = (uint32_t *)xmalloc((size_t)w * (size_t)h * sizeof(uint32_t));
+  for (k = 0; k < w * h; k++)
+    out[k] = unpremultiply(acc[k * 4], acc[k * 4 + 1], acc[k * 4 + 2], acc[k * 4 + 3]);
+  free(acc);
+  g->w = w;
+  g->h = h;
+  g->xoff = (span - w) / 2;
+  g->yoff = (cell_h - h) / 2 - ascent;
+  g->lcd = 3;
+  g->bm = (unsigned char *)out;
+  return 1;
+}
+
+
+/* CBDT, sbix: the picture made small enough for the cells (each pixel
+** the average of the ones it covers) */
+static int picture_glyph (Face *f, int gid, int span, Glyph *g) {
+  int iw, ih, w, h, x, y;
+  uint32_t *img = ot_bitmap(&f->ot, gid, cell_h, &iw, &ih), *out;
+  if (img == NULL) return 0;
+  if ((float)span / (float)iw < (float)cell_h / (float)ih) {
+    w = span;
+    h = ih * span / iw;
+  }
+  else {
+    h = cell_h;
+    w = iw * cell_h / ih;
+  }
+  if (w < 1) w = 1;
+  if (h < 1) h = 1;
+  out = (uint32_t *)xmalloc((size_t)w * (size_t)h * sizeof(uint32_t));
+  for (y = 0; y < h; y++)
+    for (x = 0; x < w; x++) {
+      int sx0 = x * iw / w, sx1 = (x + 1) * iw / w, sy0 = y * ih / h, sy1 = (y + 1) * ih / h;
+      uint32_t a = 0, r = 0, gg = 0, b = 0, n = 0;
+      int i, j;
+      if (sx1 <= sx0) sx1 = sx0 + 1;
+      if (sy1 <= sy0) sy1 = sy0 + 1;
+      for (j = sy0; j < sy1 && j < ih; j++)
+        for (i = sx0; i < sx1 && i < iw; i++) {
+          uint32_t p = img[(size_t)j * (size_t)iw + (size_t)i], pa = p >> 24;
+          a += pa;
+          r += ((p >> 16) & 0xFF) * pa / 255;
+          gg += ((p >> 8) & 0xFF) * pa / 255;
+          b += (p & 0xFF) * pa / 255;
+          n++;
+        }
+      out[(size_t)y * (size_t)w + (size_t)x] =
+        n ? unpremultiply(a / n, r / n, gg / n, b / n) : 0;
+    }
+  free(img);
+  g->w = w;
+  g->h = h;
+  g->xoff = (span - w) / 2;
+  g->yoff = (cell_h - h) / 2 - ascent;
+  g->lcd = 3;
+  g->bm = (unsigned char *)out;
+  return 1;
+}
+
+
+#define NCLUSTERS	256
+#define CLUSTER_CPS	16	/* code points of one kept */
+
+/* glyphs of the emoji font in color, 'cells' wide; 0: they have none */
+static int color_glyph (Face *f, const uint16_t *gl, int m, int cells, Glyph *g) {
+  uint16_t shown[CLUSTER_CPS * 2];
+  int first, k, n = 0;
+  memset(g, 0, sizeof(*g));
+  for (k = 0; k < m && n < CLUSTER_CPS * 2; k++) {	/* all in color, or no emoji */
+    if (ot_color_layers(&f->ot, gl[k], &first) > 0) shown[n++] = gl[k];
+    else if (!stbtt_IsGlyphEmpty(&f->info, gl[k])) break;
+  }	/* (empty ones - a variation selector, a joiner - are not drawn) */
+  if (n > 0 && k == m) return layers_glyph(f, shown, n, cell_w * cells, g);
+  if (m > 0 && (f->ot.cbdt != 0 || f->ot.sbix != 0))	/* pictures: the first */
+    return picture_glyph(f, gl[0], cell_w * cells, g);
+  return 0;
+}
+
+
+/* emoji of several code points, the last few kept */
+
+typedef struct Cluster {
+  uint32_t cps[CLUSTER_CPS];
+  int n, cells, ok;	/* n 0: an empty slot */
+  Glyph g;
+} Cluster;
+
+static Cluster clusters[NCLUSTERS];
+
+
+static void clusters_clear (void) {
+  int i;
+  for (i = 0; i < NCLUSTERS; i++) free(clusters[i].g.bm);
+  memset(clusters, 0, sizeof(clusters));
+}
+
+
+const Glyph *font_emoji (const uint32_t *cps, int n, int cells) {
+  Face *ef;
+  Cluster *c;
+  uint16_t gl[CLUSTER_CPS * 2];
+  int cl[CLUSTER_CPS * 2], k, m = 0;
+  uint32_t h = 2166136261u;
+  if (n <= 0 || n > CLUSTER_CPS || (ef = emoji_face()) == NULL) return NULL;
+  for (k = 0; k < n; k++) h = (h ^ cps[k]) * 16777619u;
+  c = &clusters[(h ^ (uint32_t)cells) % NCLUSTERS];
+  if (c->n == n && c->cells == cells && memcmp(c->cps, cps, (size_t)n * sizeof(uint32_t)) == 0)
+    return c->ok ? &c->g : NULL;
+  free(c->g.bm);
+  memset(c, 0, sizeof(*c));
+  memcpy(c->cps, cps, (size_t)n * sizeof(uint32_t));
+  c->n = n;
+  c->cells = cells;
+  for (k = 0; k < n; k++) {	/* a variation selector the font lacks: skipped */
+    int gi = stbtt_FindGlyphIndex(&ef->info, (int)cps[k]);
+    if (gi == 0 && k == 0) return NULL;
+    if (gi == 0) continue;
+    gl[m] = (uint16_t)gi;
+    cl[m++] = k;
+  }
+  m = ot_shape(&ef->ot, OT_SEQ, gl, cl, m, CLUSTER_CPS * 2);	/* ZWJ, skin tone */
+  c->ok = color_glyph(ef, gl, m, cells, &c->g);
+  return c->ok ? &c->g : NULL;
+}
+
+/* }================================================================== */
+
+
+/* the face text of this style is drawn with; *fake_*: what it lacks */
+static Face *style_face (uint32_t cp, int bold, int italic, int *fake_bold,
+                         int *fake_italic) {
+  *fake_bold = bold;
+  *fake_italic = italic;
+  if (bold && f_bold.ok && (cp == 0 || stbtt_FindGlyphIndex(&f_bold.info, (int)cp) != 0)) {
+    *fake_bold = 0;
+    return &f_bold;
+  }
+  if (italic && f_italic.ok &&
+      (cp == 0 || stbtt_FindGlyphIndex(&f_italic.info, (int)cp) != 0)) {
+    *fake_italic = 0;
+    return &f_italic;
+  }
+  return &f_regular;
+}
+
+
 const Glyph *font_glyph (uint32_t cp, int bold, int italic, int dark) {
   uint32_t key = (cp & 0x1FFFFF) | (bold ? 1u << 24 : 0) |
                  (italic ? 1u << 25 : 0) | (1u << 31);
   Slot *s;
-  Face *f = &f_regular;
-  int glyph, fake_bold = bold, fake_italic = italic, fallback = 0;
-  int x0, y0, x1, y1, adv, lsb, span;
+  Face *f, *ef;
+  int glyph, fake_bold, fake_italic, fallback = 0;
   Glyph *g;
   if (use_gdi() && dark) key |= 1u << 26;	/* GDI tunes by color */
   s = cache_find(key);
@@ -762,15 +1204,12 @@ const Glyph *font_glyph (uint32_t cp, int bold, int italic, int dark) {
   g = &s->g;
   memset(g, 0, sizeof(*g));
   if (!f_regular.ok) return g;
-  if (bold && f_bold.ok && stbtt_FindGlyphIndex(&f_bold.info, (int)cp) != 0) {
-    f = &f_bold;
-    fake_bold = 0;
+  if (emoji_presentation(cp) && (ef = emoji_face()) != NULL &&
+      (glyph = stbtt_FindGlyphIndex(&ef->info, (int)cp)) != 0) {
+    uint16_t one = (uint16_t)glyph;
+    if (color_glyph(ef, &one, 1, 2, g)) return g;
   }
-  else if (italic && f_italic.ok &&
-           stbtt_FindGlyphIndex(&f_italic.info, (int)cp) != 0) {
-    f = &f_italic;
-    fake_italic = 0;
-  }
+  f = style_face(cp, bold, italic, &fake_bold, &fake_italic);
   glyph = stbtt_FindGlyphIndex(&f->info, (int)cp);
   if (glyph == 0) {
     Face *fb = fallback_for(cp, &glyph);
@@ -784,37 +1223,64 @@ const Glyph *font_glyph (uint32_t cp, int bold, int italic, int dark) {
       glyph = stbtt_FindGlyphIndex(&f->info, (int)cp);
     }
   }
-  span = cell_w * (grid_wcwidth(cp) == 2 ? 2 : 1);
-#ifdef _WIN32
-  if (use_gdi()) {
-    /* GDI picks the bold/italic file of the family itself, or makes it */
-    Face *gf = (f == &f_bold || f == &f_italic) ? &f_regular : f;
-    int style = (bold ? ST_BOLD : 0) | (italic ? ST_ITALIC : 0);
-    if (gf->family[0] != L'\0' &&
-        gdi_glyph(gf, cp, style, dark, fallback ? span : 0, g)) {
-      darken(g);
-      return g;
-    }
-  }
-#endif
-  stbtt_GetGlyphBitmapBox(&f->info, glyph, f->scale, f->scale_y, &x0, &y0, &x1, &y1);
-  g->w = x1 - x0;
-  g->h = y1 - y0;
-  g->xoff = x0;
-  g->yoff = y0;
-  if (g->w <= 0 || g->h <= 0) {
-    g->w = g->h = 0;
-    return g;
-  }
-  g->bm = (unsigned char *)xmalloc((size_t)g->w * (size_t)g->h);
-  stbtt_MakeGlyphBitmap(&f->info, g->bm, g->w, g->h, g->w, f->scale, f->scale_y,
-                        glyph);
-  if (fallback) {	/* a fallback font is not monospace: center it in its cell(s) */
-    stbtt_GetGlyphHMetrics(&f->info, glyph, &adv, &lsb);
-    g->xoff += (span - (int)((float)adv * f->scale)) / 2;
-  }
-  if (fake_bold) embolden(g);
-  if (fake_italic) slant(g);
-  darken(g);
+  render(g, f, glyph, cp, 0, bold, italic, fake_bold, fake_italic, fallback, dark,
+         cell_w * (grid_wcwidth(cp) == 2 ? 2 : 1));
   return g;
 }
+
+
+/*
+** {==================================================================
+** Ligatures
+** ===================================================================
+*/
+
+int font_has_ligatures (int bold, int italic) {
+  int fb, fi;
+  Face *f;
+  if (!use_ligatures || !f_regular.ok) return 0;
+  f = style_face(0, bold, italic, &fb, &fi);
+  if (!ot_can_shape(&f->ot, OT_TEXT)) return 0;
+#ifdef _WIN32
+  if (use_gdi() && !gdi_same_file(f, (bold ? ST_BOLD : 0) | (italic ? ST_ITALIC : 0)))
+    return 0;	/* GDI draws another font: its glyphs are not these */
+#endif
+  return 1;
+}
+
+
+int font_shape (const uint32_t *cps, int n, int bold, int italic, uint16_t *plain,
+                uint16_t *out, int *cells, int cap) {
+  int k, fb, fi;
+  Face *f = style_face(0, bold, italic, &fb, &fi);
+  if (n > cap) return -1;
+  for (k = 0; k < n; k++) {
+    int gi = stbtt_FindGlyphIndex(&f->info, (int)cps[k]);
+    if (gi == 0) return -1;	/* from a fallback font: no ligature */
+    plain[k] = out[k] = (uint16_t)gi;
+    cells[k] = k;
+  }
+  return ot_shape(&f->ot, OT_TEXT, out, cells, n, cap);
+}
+
+
+const Glyph *font_glyph_id (int gid, int bold, int italic, int dark) {
+  uint32_t key = ((uint32_t)gid & 0xFFFF) | (bold ? 1u << 24 : 0) |
+                 (italic ? 1u << 25 : 0) | (1u << 30) | (1u << 31);
+  Slot *s;
+  Face *f;
+  int fake_bold, fake_italic;
+  Glyph *g;
+  if (use_gdi() && dark) key |= 1u << 26;
+  s = cache_find(key);
+  if (s != NULL && s->key == key) return &s->g;
+  s = cache_insert(key);
+  g = &s->g;
+  memset(g, 0, sizeof(*g));
+  if (!f_regular.ok) return g;
+  f = style_face(0, bold, italic, &fake_bold, &fake_italic);
+  render(g, f, gid, 0, 1, bold, italic, fake_bold, fake_italic, 0, dark, cell_w);
+  return g;
+}
+
+/* }================================================================== */

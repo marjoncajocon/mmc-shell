@@ -142,6 +142,69 @@ char *opt_flags (void) {
   return buf_take(&b);
 }
 
+
+/*
+** The compatibility level (bash's "shell compatibility mode"): one of
+** shopt compat31 ... compat44 at most is on, or BASH_COMPAT holds 4.2,
+** 42, 50 ... The default is the bash version mmc follows (5.2: 52).
+*/
+
+static int compat_default (void) {
+  const char *v = MMC_BASH_COMPAT;
+  return (v[0] - '0') * 10 + (v[2] - '0');
+}
+
+
+/* "4.2" or "42" -> 42; 0 for nothing, -1 for a level there is not */
+static int compat_parse (const char *s) {
+  int lvl;
+  if (s == NULL || s[0] == '\0') return 0;
+  if (isdigit((unsigned char)s[0]) && s[1] == '.' && isdigit((unsigned char)s[2]) && s[3] == '\0')
+    lvl = (s[0] - '0') * 10 + (s[2] - '0');
+  else if (isdigit((unsigned char)s[0]) && isdigit((unsigned char)s[1]) && s[2] == '\0')
+    lvl = (s[0] - '0') * 10 + (s[1] - '0');
+  else return -1;
+  if (lvl == 31 || lvl == 32 || (lvl >= 40 && lvl <= 44) || (lvl >= 50 && lvl <= compat_default()))
+    return lvl;
+  return -1;
+}
+
+
+int sh_compat (void) {
+  const ShOpt *o;
+  int lvl;
+  for (o = sh_opts; o->name; o++)
+    if (o->value && o->shopt && strncmp(o->name, "compat", 6) == 0) return atoi(o->name + 6);
+  lvl = compat_parse(var_get("BASH_COMPAT"));
+  return lvl > 0 ? lvl : compat_default();
+}
+
+
+/* BASH_COMPAT was set (or unset: NULL): the compatNN options follow it */
+void sh_compat_var (const char *value) {
+  ShOpt *o;
+  int lvl = compat_parse(value);
+  if (lvl < 0) sh_error("BASH_COMPAT: %s: compatibility value out of range", value);
+  for (o = sh_opts; o->name; o++)
+    if (o->shopt && strncmp(o->name, "compat", 6) == 0) o->value = atoi(o->name + 6) == lvl;
+}
+
+
+/* shopt -s compat42: the others go off; BASH_COMPAT follows */
+void opt_compat (const char *name, int on) {
+  ShOpt *o = opt_find(name), *p;
+  char num[24];
+  int lvl = compat_default();
+  if (o == NULL) return;
+  if (on)
+    for (p = sh_opts; p->name; p++)
+      if (p->shopt && strncmp(p->name, "compat", 6) == 0) p->value = 0;
+  o->value = on;
+  for (p = sh_opts; p->name; p++)	/* what is still on, else the default */
+    if (p->value && p->shopt && strncmp(p->name, "compat", 6) == 0) lvl = atoi(p->name + 6);
+  var_set("BASH_COMPAT", ll_to_str(lvl, num));
+}
+
 /* }================================================================== */
 
 
@@ -158,8 +221,18 @@ void sh_error (const char *fmt, ...) {
   va_start(ap, fmt);
   vsnprintf(msg, sizeof(msg), fmt, ap);
   va_end(ap);
-  if (!sh_interactive && sh_source_name != NULL)
-    fd_printf(fd, "%s: line %d: %s\n", sh_source_name, sh_lineno, msg);
+  if (!sh_interactive && sh_source_name != NULL) {
+    /* gnu_errfmt: "file:3: msg"; bash keeps "line 3" for "cd: ..." and
+    ** the other messages of builtins */
+    const char *colon = strstr(msg, ": ");
+    int gnu = O("gnu_errfmt");
+    if (gnu && colon != NULL) {
+      char *head = xstrndup(msg, (size_t)(colon - msg));
+      if (builtin_find(head, 0) != NULL) gnu = 0;
+      free(head);
+    }
+    fd_printf(fd, gnu ? "%s:%d: %s\n" : "%s: line %d: %s\n", sh_source_name, sh_lineno, msg);
+  }
   else fd_printf(fd, "mmc: %s\n", msg);
 }
 
@@ -853,9 +926,10 @@ void func_names (Vec *out) {
 static Vec callline_stack;
 
 /* every call's arguments in order, and how many each call had: BASH_ARGV
-** is the first read backwards, BASH_ARGC the second (bash fills them only
-** with shopt -s extdebug) */
+** is the first read backwards, BASH_ARGC the second (bash fills them for
+** calls only with shopt -s extdebug; the script's own are always there) */
 static Vec argv_stack, argc_stack;
+static size_t main_argv_n = 0, main_argc_n = 0;	/* those of the script */
 
 /* local -: the set options to put back when the function returns */
 static int *dash_values[MMC_FUNC_DEPTH + 1];
@@ -870,15 +944,47 @@ void sh_local_dash (void) {
 }
 
 
-static void update_args (void) {
+static void set_args (void) {
   size_t i;
-  if (!O("extdebug")) return;
   var_make_array("BASH_ARGV", 0);
   for (i = 0; i < argv_stack.n; i++)
     var_aset("BASH_ARGV", (long long)i, argv_stack.v[argv_stack.n - 1 - i]);
   var_make_array("BASH_ARGC", 0);
   for (i = 0; i < argc_stack.n; i++)
     var_aset("BASH_ARGC", (long long)i, argc_stack.v[argc_stack.n - 1 - i]);
+}
+
+
+static void update_args (void) {
+  if (O("extdebug")) set_args();
+}
+
+
+static int args_ready = 0;	/* BASH_ARGV and BASH_ARGC have been filled */
+
+
+/*
+** At start: the script's (or -c's) arguments go at the bottom. Like bash
+** the arrays get them when first used outside a function (sh_args_touch),
+** or at once with extdebug.
+*/
+void sh_main_args (void) {
+  size_t k;
+  char num[24];
+  if (argc_stack.n > 0) return;
+  for (k = 1; k < sh_pos.n; k++) vec_push(&argv_stack, xstrdup(sh_pos.v[k]));
+  vec_push(&argc_stack, xstrdup(ll_to_str((long long)(sh_pos.n ? sh_pos.n - 1 : 0), num)));
+  main_argv_n = argv_stack.n;
+  main_argc_n = argc_stack.n;
+  if (O("extdebug")) sh_args_touch();
+}
+
+
+/* BASH_ARGV or BASH_ARGC is looked at outside a function */
+void sh_args_touch (void) {
+  if (args_ready || main_argc_n == 0) return;
+  args_ready = 1;
+  set_args();
 }
 
 
@@ -905,7 +1011,7 @@ static void update_funcname (void) {
 
 int func_call (Func *f, int argc, char **argv) {
   Vec saved_pos = sh_pos;
-  int status, i;
+  int status, i, saved_loops;
   Node *body = f->body;
   Prog *prog = body->prog;
   if (func_depth >= MMC_FUNC_DEPTH) {
@@ -916,6 +1022,7 @@ int func_call (Func *f, int argc, char **argv) {
   vec_init(&sh_pos);
   vec_push(&sh_pos, xstrdup(saved_pos.n > 0 ? saved_pos.v[0] : MMC_NAME));
   for (i = 1; i < argc; i++) vec_push(&sh_pos, xstrdup(argv[i]));
+  if (sh_compat() <= 44) sh_args_touch();	/* compat44: filled even in a function */
   var_scope_push();
   vec_push(&funcname_stack, xstrdup(f->name));
   {	/* the call site, for BASH_LINENO and caller */
@@ -935,11 +1042,14 @@ int func_call (Func *f, int argc, char **argv) {
   source_push(source_top());
   func_depth++;
   return_frames++;
+  saved_loops = loop_depth;
+  if (sh_compat() > 43) loop_depth = 0;	/* compat43: break in f ends the caller's loop */
   status = exec_node(body);
   if (returning) {
     returning = 0;
     status = sh_status;
   }
+  loop_depth = saved_loops;
   return_frames--;
   func_depth--;
   if (traps[TRAP_RETURN] != NULL && traps[TRAP_RETURN][0] != '\0' && !in_trap &&
@@ -959,9 +1069,9 @@ int func_call (Func *f, int argc, char **argv) {
   funcname_stack.v[funcname_stack.n] = NULL;
   for (i = 1; i < argc && argv_stack.n > 0; i++) free(argv_stack.v[--argv_stack.n]);
   if (argc_stack.n > 0) free(argc_stack.v[--argc_stack.n]);
-  if (funcname_stack.n == 0) {	/* back in main: the script's own go too */
-    while (argv_stack.n > 0) free(argv_stack.v[--argv_stack.n]);
-    while (argc_stack.n > 0) free(argc_stack.v[--argc_stack.n]);
+  if (funcname_stack.n == 0) {	/* back in main: only what sh_main_args put there */
+    while (argv_stack.n > main_argv_n) free(argv_stack.v[--argv_stack.n]);
+    while (argc_stack.n > main_argc_n) free(argc_stack.v[--argc_stack.n]);
   }
   update_args();
   if (callline_stack.n > 0) {
@@ -1225,7 +1335,7 @@ static void state_save (State *s) {
   s->returning = returning;
   s->exit_trap_done = exit_trap_done;
   s->last_bg = sh_last_bg;
-  loop_depth = 0;
+  if (sh_compat() > 44) loop_depth = 0;	/* compat44: break leaves the subshell */
   return_frames = 0;
   exit_trap_done = 0;
   sh_subshell++;
@@ -1369,6 +1479,7 @@ char *sh_capture (const char *src, size_t *len) {
   }
   r = reader_start(p[0], &th);
   state_save(&s);
+  loop_depth = s.loop_depth;	/* bash: break in $( ) ends it, at every level */
   sh_fd[1] = p[1];
   sh_own[1] = 1;
   if (!O("inherit_errexit") && !O("posix")) opt_set("errexit", 0);	/* like bash */
@@ -1523,7 +1634,7 @@ int sh_stage_main (const char *file, long pid) {
 
 typedef struct TempVar {
   char *name, *old;
-  int flags, existed;
+  int flags, existed, keep;
 } TempVar;
 
 
@@ -1550,6 +1661,7 @@ static int temp_assign (char **assigns, int n, TempVar *saved, int export) {
       return -1;
     }
     saved[i].name = xstrdup(name);
+    saved[i].keep = 0;
     saved[i].existed = var_flags(name) >= 0;
     saved[i].flags = saved[i].existed ? var_flags(name) : 0;
     saved[i].old = var_get(name) ? xstrdup(var_get(name)) : NULL;
@@ -1566,7 +1678,7 @@ static int temp_assign (char **assigns, int n, TempVar *saved, int export) {
 static void temp_restore (TempVar *saved, int n) {
   int i;
   for (i = n - 1; i >= 0; i--) {
-    if (!(saved[i].flags & V_READONLY)) {
+    if (!(saved[i].flags & V_READONLY) && !saved[i].keep) {
       if (!saved[i].existed) var_unset(saved[i].name);
       else {
         if (saved[i].old) var_set(saved[i].name, saved[i].old);
@@ -1576,6 +1688,51 @@ static void temp_restore (TempVar *saved, int n) {
     }
     free(saved[i].name);
     free(saved[i].old);
+  }
+}
+
+
+/* does this export / readonly / declare -x -r give 'name' an attribute? */
+static int gives_attr (char **argv, const char *name) {
+  size_t nl = strlen(name);
+  int i, decl = strcmp(argv[0], "declare") == 0 || strcmp(argv[0], "typeset") == 0;
+  int attr = !decl;
+  if (!decl && strcmp(argv[0], "export") != 0 && strcmp(argv[0], "readonly") != 0) return 0;
+  if (decl && var_in_function()) return 0;	/* there it makes a new local */
+  for (i = 1; argv[i] != NULL; i++) {
+    const char *a = argv[i];
+    if (strcmp(a, "--") == 0) {
+      i++;
+      break;
+    }
+    if ((a[0] != '-' && a[0] != '+') || a[1] == '\0') break;
+    if (strpbrk(a + 1, "fgnp") != NULL) return 0;	/* functions, -g, names, listing */
+    if (strpbrk(a + 1, "xr") != NULL) {
+      if (a[0] == '+') return 0;
+      attr = 1;
+    }
+  }
+  if (!attr) return 0;
+  for (; argv[i] != NULL; i++)
+    if (strncmp(argv[i], name, nl) == 0 &&
+        (argv[i][nl] == '\0' || argv[i][nl] == '=' || (argv[i][nl] == '+' && argv[i][nl + 1] == '=')))
+      return 1;
+  return 0;
+}
+
+
+/*
+** "v=1 export v", "v=1 readonly v": the value stays, exported (in bash it
+** came from the temporary environment). compat44: when v is a function's
+** local the global v gets it too.
+*/
+static void temp_keep (TempVar *saved, int n, char **argv) {
+  int i;
+  for (i = 0; i < n; i++) {
+    if (!gives_attr(argv, saved[i].name)) continue;
+    saved[i].keep = 1;
+    var_set_flags(saved[i].name, V_EXPORT, 0);
+    if (sh_compat() <= 44 && !O("posix")) var_copy_global(saved[i].name);
   }
 }
 
@@ -1850,6 +2007,7 @@ static int run_argv (Vec *argv, char **assigns, int nassigns, int flags) {
   if ((b = builtin_find(name, 0)) != NULL && builtin_enabled(name)) {
     if (temp_assign(assigns, n, saved, 0) != 0) return 1;
     status = b->fn((int)argv->n, argv->v, sh_fd[0], sh_fd[1], sh_fd[2]);
+    temp_keep(saved, n, argv->v);
     temp_restore(saved, n);
     return status;
   }

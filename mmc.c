@@ -1431,6 +1431,7 @@ int main (int argc, char **argv) {
     vec_free(&cands);
     return 0;
   }
+  sh_main_args();	/* BASH_ARGV, BASH_ARGC */
   if (command != NULL) {
     sh_run_string(command, MMC_NAME, 1);
   }

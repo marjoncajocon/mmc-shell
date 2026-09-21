@@ -1,0 +1,7 @@
+in f: [] []
+top: [] [0]
+in f: [] [0]
+after set: [] [0]
+in f: [y x] [2 0]
+extdebug top: [] [0]
+status: 0

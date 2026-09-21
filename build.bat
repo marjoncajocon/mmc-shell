@@ -19,11 +19,11 @@ set ZIG=zig
 where zig >nul 2>nul || set ZIG=D:\env\zig\zig.exe
 
 set CFLAGS=-std=c11 -O2 -s -Wall -Wextra -pedantic
-rem the default font: Hack with the Powerline and Nerd Font icons
-set FONTS=HackNerdFontMono-Regular.ttf HackNerdFontMono-Bold.ttf HackNerdFontMono-Italic.ttf HackNerdFontMono-BoldItalic.ttf HackNerdFont-LICENSE.md HackNerdFont-README.md
+rem the default font: JetBrains Mono with ligatures, the Powerline and Nerd Font icons
+set FONTS=JetBrainsMonoNerdFontMono-Regular.ttf JetBrainsMonoNerdFontMono-Bold.ttf JetBrainsMonoNerdFontMono-Italic.ttf JetBrainsMonoNerdFontMono-BoldItalic.ttf JetBrainsMonoNerdFont-OFL.txt JetBrainsMonoNerdFont-README.md
 set BASE=mutil.c mpath.c mos.c
 set SRC=mmc.c mparse.c mexpand.c mpattern.c marith.c mregex.c mvar.c mexec.c mjobs.c mbuiltin.c mbvars.c mbio.c mbtest.c mline.c mcomp.c %BASE%
-set CORE=tgrid.c tvt.c ttheme.c tfont.c tdraw.c
+set CORE=tgrid.c tvt.c ttheme.c tfont.c tshape.c tdraw.c
 set TSRC=mterm.c tapp.c tpty.c twin32.c tx11.c tcocoa.c %CORE% %BASE%
 rem Windows only: the .rc files put the icon (mmc.ico) and version details in
 set WINRES=mmc.rc -lshell32
@@ -82,7 +82,7 @@ call :put mmc.exe "%~2\mmc.exe" || exit /b 1
 call :put mmc.exe "%~2\mmc-shell.exe" || exit /b 1
 call :put mmc-term.exe "%~2\mmc-term.exe" || exit /b 1
 copy /y LICENSE "%~2\LICENSE" >nul
-rem the Hack Nerd Font travels with mmc: mmc-term looks in usr\share\fonts first
+rem the JetBrains Mono Nerd Font travels with mmc: mmc-term looks in usr\share\fonts first
 if not exist "%~2\usr\share\fonts" mkdir "%~2\usr\share\fonts"
 for %%F in (%FONTS%) do copy /y %%F "%~2\usr\share\fonts\%%F" >nul
 echo installed mmc.exe, mmc-shell.exe and mmc-term.exe in "%~2"

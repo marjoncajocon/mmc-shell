@@ -315,9 +315,17 @@ static void del_tick (id self, SEL cmd, id timer) {
   clock_gettime(CLOCK_MONOTONIC, &ts);
   app_on_tick((unsigned)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000));
   app_on_wake();	/* the pty is polled: reading never blocks */
-  if (need_redraw && view != NULL) {
+  if (need_redraw && view != NULL) {	/* drawn here; the view shows what changed */
+    const Frame *f = app_render();
     need_redraw = 0;
-    msg_bool(view, "setNeedsDisplay:", 1);
+    if (f != NULL) {
+      last_frame = f;
+      if (f->dh > 0 && f->dh < f->h)	/* only those rows (the view is flipped) */
+        ((MsgRect)R.objc_msgSend)(view, SELN("setNeedsDisplayInRect:"),
+                                  make_rect(0, (double)f->dy / backing,
+                                            (double)f->w / backing, (double)f->dh / backing));
+      else msg_bool(view, "setNeedsDisplay:", 1);
+    }
   }
 }
 

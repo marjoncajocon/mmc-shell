@@ -601,6 +601,68 @@ static void list_map (List *l, MapFn f, void *ud) {
 }
 
 
+/*
+** compat42: the replacement of "${x/p/r}" gets no quote removal; it reads
+** like the inside of "...": ' and " stay, \ escapes only $ ` " \ and &,
+** and an & is what matched even when it comes from $var. Each piece
+** between the \& is rewritten as the unquoted text that expands to the
+** same; the result is marked, like expand_to_str(..., 1) gives.
+*/
+static void rep42_piece (Buf *out, Buf *raw) {
+  char *m = expand_to_str(raw->s ? raw->s : "", raw->len, 0, 1);
+  const char *p;
+  for (p = m; *p; p++) {
+    if (*p == QMARK && p[1] == '&') continue;	/* & from anywhere is special */
+    if (*p == QMARK && p[1] != '\0') buf_putc(out, *p++);
+    buf_putc(out, *p);
+  }
+  free(m);
+  buf_free(raw);
+  buf_init(raw);
+}
+
+
+static char *rep_compat42 (const char *s) {
+  Buf b, out;
+  size_t i = 0, n = strlen(s);
+  buf_init(&b);
+  buf_init(&out);
+  while (i < n) {
+    char c = s[i];
+    if (c == '\\' && s[i + 1] == '&') {	/* the one literal & */
+      rep42_piece(&out, &b);
+      buf_putc(&out, QMARK);
+      buf_putc(&out, '&');
+      i += 2;
+    }
+    else if (c == '\\' && i + 1 < n && strchr("$`\"\\\n", s[i + 1]) != NULL) {
+      buf_putn(&b, s + i, 2);
+      i += 2;
+    }
+    else if (c == '\\' || c == '\'' || c == '"' || (c == '~' && i == 0)) {
+      buf_putc(&b, '\\');
+      buf_putc(&b, c);
+      i++;
+    }
+    else if (c == '$' || c == '`') {	/* expanded as inside "..." */
+      size_t end = 1;
+      if (c == '`' || s[i + 1] == '{' || s[i + 1] == '(') end = parse_skip_subst(s + i, 0);
+      else if (isalpha((unsigned char)s[i + 1]) || s[i + 1] == '_')
+        while (isalnum((unsigned char)s[i + end]) || s[i + end] == '_') end++;
+      else if (s[i + 1] != '\0' && strchr("0123456789@*#?-$!", s[i + 1]) != NULL) end = 2;
+      if (end == 0 || end > n - i) end = n - i;
+      buf_putc(&b, '"');
+      buf_putn(&b, s + i, end);
+      buf_putc(&b, '"');
+      i += end;
+    }
+    else buf_putc(&b, s[i++]);
+  }
+  rep42_piece(&out, &b);
+  return buf_take(&out);
+}
+
+
 typedef struct TrimArg { const char *pat; int back, longest; } TrimArg;
 static char *map_trim (const char *s, void *ud) {
   TrimArg *a = (TrimArg *)ud;
@@ -858,8 +920,9 @@ static void expand_braced (Exp *e, const char *body) {
         else if (*w == '%') mode = 3, w++;
         pl = operand_len(w, "/");
         pat = expand_to_str(w, pl, 0, 1);
-        rep = (w[pl] == '/') ? expand_to_str(w + pl + 1, strlen(w + pl + 1), 0, 1)
-                             : xstrdup("");
+        if (w[pl] == '/' && e->in_dq && sh_compat() <= 42) rep = rep_compat42(w + pl + 1);
+        else rep = (w[pl] == '/') ? expand_to_str(w + pl + 1, strlen(w + pl + 1), 0, 1)
+                                  : xstrdup("");
         a.pat = pat;
         a.rep = rep;
         a.mode = mode;

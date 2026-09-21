@@ -158,7 +158,8 @@ static void syntax_error (Parser *p, const char *fmt, const char *arg) {
   }
   else {
     if (p->name != NULL && !sh_interactive)
-      fd_printf(2, "%s: line %d: syntax error: ", p->name, p->tok.line ? p->tok.line : p->line);
+      fd_printf(2, O("gnu_errfmt") ? "%s:%d: syntax error: " : "%s: line %d: syntax error: ",
+                p->name, p->tok.line ? p->tok.line : p->line);
     else fd_printf(2, "mmc: syntax error: ");
     fd_printf(2, fmt, arg);
     fd_puts(2, "\n");

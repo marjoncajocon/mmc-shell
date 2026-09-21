@@ -189,7 +189,11 @@ static void blit_glyph (Frame *f, const Glyph *g, int x, int y, uint32_t fg,
       uint32_t *p;
       if (px < clip_x0 || px >= clip_x1) continue;
       p = &f->px[(size_t)py * (size_t)f->w + (size_t)px];
-      if (g->lcd == 1) {	/* ClearType: already tuned by the system */
+      if (g->lcd == 3) {	/* a color emoji: its own colors */
+        uint32_t c = ((const uint32_t *)(const void *)g->bm)[at], a = c >> 24;
+        if (a != 0) *p = (a == 255) ? (c & 0xFFFFFF) : mix(*p, c & 0xFFFFFF, (int)a);
+      }
+      else if (g->lcd == 1) {	/* ClearType: already tuned by the system */
         const unsigned char *c = g->bm + at * 3;
         if ((c[0] | c[1] | c[2]) != 0) *p = mix3(*p, fg, c[0], c[1], c[2]);
       }
@@ -529,12 +533,26 @@ static void draw_underline (Frame *f, const Scene *s, const Cell *c, int px, int
 }
 
 
+/* an emoji of several code points (a skin tone, a ZWJ sequence, a
+** keycap), not a letter with accents */
+static int emoji_cluster (const uint32_t *cps, int n) {
+  int k;
+  for (k = 1; k < n; k++)
+    if (cps[k] == 0x200D || cps[k] == 0xFE0F || cps[k] == 0x20E3 ||
+        (cps[k] >= 0x1F3FB && cps[k] <= 0x1F3FF) || (cps[k] >= 0xE0020 && cps[k] <= 0xE007F))
+      return 1;
+  return 0;
+}
+
+
 /* the text of a cell; a glyph may reach out to [clip0, clip1) - italics
 ** and the colored ClearType edges need that. link: 1 a hyperlink is
-** there (dotted line), 2 the mouse is on it (full line) */
+** there (dotted line), 2 the mouse is on it (full line). gid: -1 the
+** cell's own character, -2 nothing (a ligature before it covers the
+** cell), else that glyph of the font (a ligature) */
 static void draw_cell_fg (Frame *f, const Scene *s, const Cell *c, int px,
                           int py, uint32_t fg, uint32_t bg, int clip0,
-                          int clip1, int link) {
+                          int clip1, int link, int gid) {
   int w = s->cw * ((c->attr & A_WIDE) ? 2 : 1);
   int line = (s->ch + 8) / 16;
   uint32_t ch = grid_base(s->g, c);
@@ -546,16 +564,33 @@ static void draw_cell_fg (Frame *f, const Scene *s, const Cell *c, int px,
   if (line < 1) line = 1;
   if (ch > ' ' && !(c->attr & A_HIDDEN) && (!(c->attr & A_BLINK) || s->text_blink_on)) {
     int drawn = 0;
-    if (ch >= 0x2500 && ch <= 0x257F)
-      drawn = draw_box(f, ch, px, py, w, s->ch, fg, px == (s->ox > 0 ? s->ox : s->pad));
-    else if (ch >= 0x2580 && ch <= 0x259F)
-      drawn = draw_block(f, ch, px, py, w, s->ch, fg);
-    else if (ch >= 0xE0B0 && ch <= 0xE0BF)
-      drawn = draw_powerline(f, ch, px, py, w, s->ch, fg);
+    if (gid != -1) {
+      if (gid >= 0)
+        blit_glyph(f, font_glyph_id(gid, bold, c->attr & A_ITALIC, dark),
+                   px, py + s->ascent, fg, bg, clip0, clip1);
+      drawn = 1;
+    }
+    else if (c->ch & CH_CLUSTER) {	/* an emoji of several code points, in color */
+      const uint32_t *cps;
+      int n = grid_cps(s->g, c, &cps);
+      const Glyph *e = emoji_cluster(cps, n) ? font_emoji(cps, n, w / s->cw) : NULL;
+      if (e != NULL) {
+        blit_glyph(f, e, px, py + s->ascent, fg, bg, clip0, clip1);
+        drawn = 2;	/* the whole cluster: no marks on top */
+      }
+    }
+    if (drawn == 0) {
+      if (ch >= 0x2500 && ch <= 0x257F)
+        drawn = draw_box(f, ch, px, py, w, s->ch, fg, px == (s->ox > 0 ? s->ox : s->pad));
+      else if (ch >= 0x2580 && ch <= 0x259F)
+        drawn = draw_block(f, ch, px, py, w, s->ch, fg);
+      else if (ch >= 0xE0B0 && ch <= 0xE0BF)
+        drawn = draw_powerline(f, ch, px, py, w, s->ch, fg);
+    }
     if (!drawn)
       blit_glyph(f, font_glyph(ch, bold, c->attr & A_ITALIC, dark),
                  px, py + s->ascent, fg, bg, clip0, clip1);
-    if (c->ch & CH_CLUSTER) {	/* the marks: centered over the character */
+    if ((c->ch & CH_CLUSTER) && drawn != 2) {	/* the marks: centered over the character */
       const uint32_t *cps;
       int n = grid_cps(s->g, c, &cps), k;
       for (k = 1; k < n; k++) {
@@ -586,7 +621,7 @@ static void draw_cell (Frame *f, const Scene *s, const Cell *c, int px, int py,
                        uint32_t fg, uint32_t bg) {
   int w = s->cw * ((c->attr & A_WIDE) ? 2 : 1);
   fill(f, px, py, w, s->ch, bg);
-  draw_cell_fg(f, s, c, px, py, fg, bg, px, px + w, 0);
+  draw_cell_fg(f, s, c, px, py, fg, bg, px, px + w, 0, -1);
 }
 
 
@@ -918,6 +953,65 @@ static int row_dirty (const Grid *g, int row) {
 }
 
 
+/* a cell a ligature may take in: plain text, drawn from the font */
+static int can_join (const Cell *c) {
+  return !(c->attr & (A_WIDE | A_WCONT)) && !(c->ch & (CH_CLUSTER | CH_IMAGE)) &&
+         c->ch < 0x2500;
+}
+
+
+#define LIG_RUN	256	/* cells shaped at once */
+
+/*
+** Ligatures: what each cell of a row shows when the font joins runs of
+** characters (-> as an arrow). lig[x]: -1 the cell's own character, -2
+** nothing, else a glyph of the font, which may paint over its whole run
+** (cells run0[x] to run1[x]). Runs break where bold or italic changes;
+** the cell of the cursor stays alone, so what is typed there shows as
+** typed. Returns 0 when no cell of the row changed.
+*/
+static int shape_row (const Scene *s, const Line *l, int row, int *lig, int *run0,
+                      int *run1) {
+  static uint32_t cps[LIG_RUN];
+  static uint16_t plain[LIG_RUN], out[LIG_RUN * 2];
+  static int cells[LIG_RUN * 2];
+  const Grid *g = s->g;
+  int n = l->n < g->cols ? l->n : g->cols, x, any = 0;
+  int cur = (g->cursor_on && row == g->cy + g->view) ? g->cx : -1;
+  if (!font_has_ligatures(0, 0) && !font_has_ligatures(1, 0)) return 0;
+  for (x = 0; x < n; x++) lig[x] = -1;
+  for (x = 0; x < n;) {
+    const Cell *c = &l->c[x];
+    int bold = (c->attr & A_BOLD) && !s->no_bold, italic = (c->attr & A_ITALIC) != 0;
+    int a = x, k, m, changed;
+    if (!can_join(c) || x == cur) {
+      x++;
+      continue;
+    }
+    for (; x < n && x - a < LIG_RUN && x != cur && can_join(&l->c[x]) &&
+           (((l->c[x].attr & A_BOLD) && !s->no_bold) == bold) &&
+           (((l->c[x].attr & A_ITALIC) != 0) == italic); x++)
+      cps[x - a] = l->c[x].ch > ' ' ? l->c[x].ch : ' ';
+    if (x - a < 2 || !font_has_ligatures(bold, italic)) continue;
+    m = font_shape(cps, x - a, bold, italic, plain, out, cells, LIG_RUN * 2);
+    if (m < 0) continue;
+    changed = (m != x - a);
+    for (k = 0; k < m && !changed; k++) changed = (out[k] != plain[k]);
+    if (!changed) continue;
+    for (k = a; k < x; k++) {
+      lig[k] = -2;
+      run0[k] = a;
+      run1[k] = x;
+    }
+    for (k = m - 1; k >= 0; k--) lig[a + cells[k]] = out[k];	/* the first of a cell wins */
+    for (k = a; k < x; k++)	/* unchanged: drawn as always */
+      if (lig[k] == plain[k - a]) lig[k] = -1;
+    any = 1;
+  }
+  return any;
+}
+
+
 /*
 ** The rows of s->g, and its cursor. partial: only rows whose line is
 ** dirty, and the rows next to them (a glyph may reach into those), are
@@ -926,12 +1020,20 @@ static int row_dirty (const Grid *g, int row) {
 */
 static void draw_terminal (Frame *f, const Scene *s, int partial, int x0, int x1,
                            int *y0, int *y1) {
+  static int *lig = NULL, *run0, *run1, nlig = 0;
   const Grid *g = s->g;
   int row, x, gx = grid_x(s), cursor_row = g->cy + g->view;
+  if (nlig < g->cols) {
+    free(lig);
+    nlig = g->cols;
+    lig = (int *)xmalloc((size_t)nlig * 3 * sizeof(int));
+    run0 = lig + nlig;
+    run1 = run0 + nlig;
+  }
   for (row = 0; row < g->rows; row++) {
     const Line *l = grid_view_line(g, row);
     int y = row - g->view;	/* in grid_line() terms, for the selection */
-    int py = grid_y(s) + row * s->ch;
+    int py = grid_y(s) + row * s->ch, shaped;
     if (partial) {
       if (!row_dirty(g, row) && !row_dirty(g, row - 1) && !row_dirty(g, row + 1)) continue;
       fill(f, x0, py, x1 - x0, s->ch, s->t->bg);
@@ -950,6 +1052,7 @@ static void draw_terminal (Frame *f, const Scene *s, int partial, int x0, int x1
       cell_colors(s, c, sel, &fg, &bg);
       fill(f, gx + x * s->cw, py, s->cw * ((c->attr & A_WIDE) ? 2 : 1), s->ch, bg);
     }
+    shaped = shape_row(s, l, row, lig, run0, run1);
     for (x = 0; x < g->cols && x < l->n; x++) {
       const Cell *c = &l->c[x];
       uint32_t fg, bg;
@@ -957,9 +1060,14 @@ static void draw_terminal (Frame *f, const Scene *s, int partial, int x0, int x1
       if (c->attr & A_WCONT) continue;
       if (c->ch <= ' ' && !(c->attr & (A_UNDER | A_STRIKE | A_OVER)) && c->link == 0) continue;
       cell_colors(s, c, sel, &fg, &bg);
-      draw_cell_fg(f, s, c, px, py, fg, bg, px - s->cw / 2,
-                   px + s->cw * ((c->attr & A_WIDE) ? 2 : 1) + s->cw / 2,
-                   in_hot(s, x, y) ? 2 : c->link != 0 ? 1 : 0);
+      if (shaped && lig[x] != -1)	/* a ligature may paint its whole run */
+        draw_cell_fg(f, s, c, px, py, fg, bg, gx + run0[x] * s->cw - s->cw / 2,
+                     gx + run1[x] * s->cw + s->cw / 2,
+                     in_hot(s, x, y) ? 2 : c->link != 0 ? 1 : 0, lig[x]);
+      else
+        draw_cell_fg(f, s, c, px, py, fg, bg, px - s->cw / 2,
+                     px + s->cw * ((c->attr & A_WIDE) ? 2 : 1) + s->cw / 2,
+                     in_hot(s, x, y) ? 2 : c->link != 0 ? 1 : 0, -1);
     }
   }
   if (!partial || row_dirty(g, cursor_row) || row_dirty(g, cursor_row - 1) ||

@@ -1,0 +1,44 @@
+== 43
+loop 1
+loop 2
+cloop 1
+cloop 2
+cs 1 []
+cs 2 []
+== 44
+f 1
+f 2
+f 3
+g 1
+g 2
+h after
+h 1
+h after
+h 2
+loop 1
+loop 2
+cloop 1
+cloop 2
+cs 1 []
+cs 2 []
+== 52
+f 1
+f 2
+f 3
+g 1
+g 2
+h after
+h 1
+h after
+h 2
+sub 1
+loop 1
+sub 2
+loop 2
+csub 1
+cloop 1
+csub 2
+cloop 2
+cs 1 []
+cs 2 []
+status: 0

@@ -1,0 +1,7 @@
+gnu_errfmt.sh: line 3: nosuch_command_q1: command not found
+gnu_errfmt.sh:5: nosuch_command_q2: command not found
+gnu_errfmt.sh: line 6: cd: ./no_such_dir_q3: No such file or directory
+gnu_errfmt.sh:7: r: readonly variable
+gnu_errfmt.sh: line 9: nosuch_command_q4: command not found
+done
+status: 0

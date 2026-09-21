@@ -242,23 +242,45 @@ static void on_mouse (int type, int button, LPARAM lp, WPARAM wp, int arg) {
 /* }================================================================== */
 
 
+/* our own redraws (win_redraw) mark just this pixel as out of date;
+** what the system marks (the window uncovered, resized) is bigger */
+static const RECT ours = {0, 0, 1, 1};
+
+
+/* rows y .. y+h of the frame to the window */
+static void put_rows (HDC dc, const Frame *f, int y, int h) {
+  BITMAPINFO bi;
+  memset(&bi, 0, sizeof(bi));
+  bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+  bi.bmiHeader.biWidth = f->w;
+  bi.bmiHeader.biHeight = -h;	/* top row first */
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  SetDIBitsToDevice(dc, 0, y, (DWORD)f->w, (DWORD)h, 0, 0, 0, (UINT)h,
+                    f->px + (size_t)y * (size_t)f->w, &bi, DIB_RGB_COLORS);
+}
+
+
+/*
+** The window shows what changed: after our own redraw only the rows
+** that were drawn again go to the screen (typing: one row of pixels, not
+** the window), after the system's the whole picture.
+*/
 static void paint (void) {
   PAINTSTRUCT ps;
   HDC dc = BeginPaint(hwnd, &ps);
   const Frame *f = app_render();
+  int only_ours = EqualRect(&ps.rcPaint, &ours);
   if (f != NULL) last_frame = f;
   if (last_frame != NULL && last_frame->px != NULL) {
-    BITMAPINFO bi;
-    memset(&bi, 0, sizeof(bi));
-    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
-    bi.bmiHeader.biWidth = last_frame->w;
-    bi.bmiHeader.biHeight = -last_frame->h;	/* top row first */
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    SetDIBitsToDevice(dc, 0, 0, (DWORD)last_frame->w, (DWORD)last_frame->h,
-                      0, 0, 0, (UINT)last_frame->h, last_frame->px, &bi,
-                      DIB_RGB_COLORS);
+    if (only_ours && f != NULL && f->dh > 0 && f->dh < f->h) {
+      HDC wdc = GetDC(hwnd);	/* not clipped to the one pixel */
+      put_rows(wdc, f, f->dy, f->dh);
+      ReleaseDC(hwnd, wdc);
+    }
+    else if (!only_ours || f != NULL)
+      put_rows(dc, last_frame, 0, last_frame->h);
   }
   EndPaint(hwnd, &ps);
 }
@@ -481,7 +503,7 @@ void win_wake (void) {
 
 
 void win_redraw (void) {
-  if (hwnd != NULL) InvalidateRect(hwnd, NULL, FALSE);
+  if (hwnd != NULL) InvalidateRect(hwnd, &ours, FALSE);	/* see paint() */
 }
 
 

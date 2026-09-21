@@ -881,7 +881,9 @@ int b_shopt (int argc, char **argv, int in, int out, int err) {
       status = 1;
       continue;
     }
-    if (mode == 's') found->value = 1;
+    if (mode != 0 && found->shopt && strncmp(found->name, "compat", 6) == 0)
+      opt_compat(found->name, mode == 's');	/* one level at a time, BASH_COMPAT too */
+    else if (mode == 's') found->value = 1;
     else if (mode == 'u') found->value = 0;
     else {
       if (!found->value) status = 1;

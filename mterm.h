@@ -211,6 +211,7 @@ typedef struct Config {
   int no_bold;	/* 1: bold text is drawn in the normal weight */
   int native_titlebar;	/* 1: let the system draw the title bar */
   int smoothing;	/* SMOOTH_*: how glyphs are rasterized */
+  int ligatures;	/* 1: the font's ligatures (calt, liga) are used */
   int has_bg, has_fg, has_cursor;
   uint32_t bg, fg, cursor_color;
   int has_pal[16];
@@ -250,8 +251,10 @@ double theme_contrast (uint32_t a, uint32_t b);
 typedef struct Glyph {
   int w, h, xoff, yoff;	/* yoff from the baseline, up is negative */
   int lcd;	/* 0: stb_truetype coverage, 1: R, G, B coverage per pixel
-		   (ClearType), 2: gray from the system rasterizer */
-  unsigned char *bm;	/* w*h coverage (w*h*3 when lcd is 1), NULL if empty */
+		   (ClearType), 2: gray from the system rasterizer, 3: a
+		   color picture (emoji), 0xAARRGGBB per pixel */
+  unsigned char *bm;	/* w*h coverage (w*h*3 when lcd is 1, w*h*4 when
+			   it is 3), NULL if empty */
 } Glyph;
 
 void font_add_dir (const char *native);	/* fonts carried with mmc */
@@ -264,6 +267,55 @@ const char *font_name (void);
 /* 'dark': dark text on a light background (the system rasterizer
 ** tunes its coverage for the colors it draws with) */
 const Glyph *font_glyph (uint32_t cp, int bold, int italic, int dark);
+/* an emoji of several code points (a skin tone, a ZWJ sequence) in color,
+** 'cells' wide; NULL when there is no color font for it */
+const Glyph *font_emoji (const uint32_t *cps, int n, int cells);
+/* ligatures: does the font of this style have any (and are they on)? */
+int font_has_ligatures (int bold, int italic);
+/* the glyphs of a run of n cells after the font's ligature rules: out[k]
+** is drawn in cell cells[k]; plain[] gets the glyphs before them. Returns
+** how many glyphs, or -1 when the font lacks one of the characters */
+int font_shape (const uint32_t *cps, int n, int bold, int italic, uint16_t *plain,
+                uint16_t *out, int *cells, int cap);
+const Glyph *font_glyph_id (int gid, int bold, int italic, int dark);
+
+/* }================================================================== */
+
+
+/*
+** {==================================================================
+** tshape.c - the OpenType tables stb_truetype does not read
+** ===================================================================
+*/
+
+#define OT_TEXT	0	/* rlig rclt calt liga clig: the ligatures of code */
+#define OT_SEQ	1	/* ccmp rlig liga clig calt: emoji sequences */
+
+typedef struct OtFace {
+  const unsigned char *d;
+  size_t n;	/* bytes in d */
+  uint32_t gsub, colr, cpal, cblc, cbdt, sbix;	/* where the tables are, 0: none */
+  int nglyphs;
+  int nlk[2];	/* lookups for OT_TEXT and OT_SEQ, in the order they run */
+  uint16_t *lk[2];
+  unsigned char *first[2];	/* per lookup a bit per glyph it may start at,
+				   then all of them together */
+} OtFace;
+
+int ot_open (OtFace *o, const unsigned char *data, size_t n, int fontstart);
+void ot_close (OtFace *o);
+int ot_can_shape (const OtFace *o, int which);
+/* substitutes g[0..n) in place (cl[] follows: the cell each came from);
+** returns the new count, at most cap */
+int ot_shape (const OtFace *o, int which, uint16_t *g, int *cl, int n, int cap);
+/* COLR: the number of layers of a glyph (0: none), the first in *first */
+int ot_color_layers (const OtFace *o, int gid, int *first);
+void ot_layer (const OtFace *o, int index, int *gid, int *palette_index);
+uint32_t ot_palette (const OtFace *o, int index, uint32_t fg);
+/* CBDT or sbix: the picture of a glyph as 0xAARRGGBB, from the strike
+** nearest above want_ppem; NULL when there is none */
+uint32_t *ot_bitmap (const OtFace *o, int gid, int want_ppem, int *w, int *h);
+uint32_t *png_decode (const unsigned char *p, size_t n, int *w, int *h);
 
 /* }================================================================== */
 
@@ -280,7 +332,7 @@ typedef struct Frame {
   int dy, dh;	/* the rows of pixels the last drawing changed */
 } Frame;
 
-#define MENU_MAX	24
+#define MENU_MAX	32
 #define TAB_MAX	32
 #define PANE_MAX	8	/* panes in one tab */
 

@@ -1,0 +1,26 @@
+inner: global
+outer: from_inner
+global: from_inner
+same: UNSET
+same again: again
+global: global
+inner: UNSET
+outer: from_inner
+global: global
+same: UNSET
+same again: again
+global: global
+deep: UNSET
+mid: UNSET
+top: UNSET
+top again: reset
+global: global
+deep: global
+mid: global
+top: global
+top again: reset
+global: reset
+twice: UNSET
+owner: UNSET
+global: UNSET
+status: 0

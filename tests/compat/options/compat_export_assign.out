@@ -1,0 +1,21 @@
+f: 1
+declare -x v="1"
+after f: g
+k: v=1 w=2
+declare -x v="1"
+declare -rx w="2"
+declare -- u="0"
+declare -x t="7"
+q=0
+f: 1
+declare -x v="1"
+after f: 1
+k: v=1 w=2
+declare -x v="1"
+declare -rx w="2"
+declare -- u="0"
+declare -x t="7"
+q=0
+declare -x s="8"
+declare -rx p="3"
+status: 0

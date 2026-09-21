@@ -6,13 +6,13 @@ For more information see:
 * https://github.com/ryanoasis/nerd-fonts/
 * https://github.com/ryanoasis/nerd-fonts/releases/latest/
 
-# Hack
+# JetBrains Mono
 
-A typeface designed for source code.
+JetBrains Mono: a typeface made for developers
 
-For more information have a look at the upstream website: https://github.com/source-foundry/Hack
+For more information have a look at the upstream website: https://github.com/JetBrains/JetBrainsMono
 
-Version: 3.003
+Version: 2.304
 
 ## Icon sets
 
@@ -55,8 +55,8 @@ Once you narrow down your font choice of family (`Droid Sans`, `Inconsolata`, et
 #### `Option 1: Download already patched font`
 
  * For a stable version download a font package from the [release page](https://github.com/ryanoasis/nerd-fonts/releases)
-   * [Hack.zip](https://github.com/ryanoasis/nerd-fonts/releases/latest/download/Hack.zip)
-   * [Hack.tar.xz](https://github.com/ryanoasis/nerd-fonts/releases/latest/download/Hack.tar.xz) (smaller)
+   * [JetBrainsMono.zip](https://github.com/ryanoasis/nerd-fonts/releases/latest/download/JetBrainsMono.zip)
+   * [JetBrainsMono.tar.xz](https://github.com/ryanoasis/nerd-fonts/releases/latest/download/JetBrainsMono.tar.xz) (smaller)
  * Or download the development version from the folders here
 
 #### `Option 2: Patch your own font`

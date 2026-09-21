@@ -278,6 +278,7 @@ int var_set (const char *name, const char *value);	/* -1: readonly */
 int var_append (const char *name, const char *value);	/* += */
 int var_unset (const char *name);	/* -1: readonly */
 int var_unset_local (const char *name);
+void var_copy_global (const char *name);	/* compat44: a local's value to the global */
 int var_flags (const char *name);	/* -1: absent */
 int var_set_flags (const char *name, int on, int off);	/* creates it */
 int var_is_set (const char *name);
@@ -469,6 +470,9 @@ int opt_get (const char *name);
 int opt_set (const char *name, int on);	/* -1: unknown */
 int opt_letter (char c, int on);	/* -1: unknown */
 char *opt_flags (void);	/* $- */
+void opt_compat (const char *name, int on);	/* shopt -s/-u compatNN */
+int sh_compat (void);	/* the compatibility level: 31 ... 52 */
+void sh_compat_var (const char *value);	/* BASH_COMPAT was set or unset */
 #define O(name)	opt_get(name)
 
 void sh_setvar (const char *name, const char *value);
@@ -505,6 +509,8 @@ int sh_can_return (void);	/* inside a function or sourced file? */
 void sh_do_return (int status);
 void sh_do_break (int n, int is_continue);
 int sh_loop_depth (void);
+void sh_main_args (void);	/* BASH_ARGV and BASH_ARGC of the script */
+void sh_args_touch (void);	/* first use of BASH_ARGV outside a function */
 int sh_stage_main (const char *file, long pid);	/* mmc --stage */
 
 /* functions */
@@ -606,6 +612,7 @@ void alias_names (Vec *out);
 void *alias_save (void);
 void alias_restore (void *saved);
 void alias_dump (Buf *b);
+char *path_spell (const char *path);	/* cdspell, dirspell: NULL if nothing to fix */
 
 /* each file registers its builtins in mbuiltin.c's table */
 int b_test (int argc, char **argv, int in, int out, int err);

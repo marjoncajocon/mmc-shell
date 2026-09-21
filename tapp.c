@@ -17,6 +17,7 @@
 enum { M_COPY = 1, M_PASTE, M_SELECT_ALL, M_BIGGER, M_SMALLER,
        M_MORE_CLEAR, M_LESS_CLEAR, M_NEW_TAB, M_RENAME_TAB, M_CLOSE_TAB,
        M_NEW_WINDOW, M_ABOUT, M_FIND, M_SPLIT_RIGHT, M_SPLIT_DOWN, M_CLOSE_PANE,
+       M_BLINK,
        M_THEME /* + theme number, keep last */ };
 
 /* one shell with its own screen: a tab has one, or several side by side */
@@ -72,6 +73,8 @@ static struct {
   int hot_tab, hot_close, pressed_close;
   unsigned tab_click_at;	/* a double click on a tab renames it */
   int tab_click;
+  int tab_drag, tab_drag_x;	/* the tab held by the mouse (-1: none), where it was taken */
+  int tab_moving;	/* it went far enough to be moving, not clicked */
   int renaming;	/* the tab on screen is being renamed; A.edit is the text */
   char edit[64];
   char edit_pill[96];	/* no tab bar: the name is typed in a pill */
@@ -447,6 +450,16 @@ static void change_opacity (int delta) {
   touch();
 }
 
+/* a steady cursor costs nothing; a blinking one redraws its row twice a second */
+static void toggle_blink (void) {
+  A.cfg.cursor_blink = !A.cfg.cursor_blink;
+  A.blink_on = 1;
+  A.blink_at = A.now;
+  if (A.g->cy < A.g->rows) A.g->screen[A.g->cy].dirty = 1;
+  if (A.conf != NULL) config_set_key(A.conf, "cursor_blink", A.cfg.cursor_blink ? "yes" : "no");
+  touch();
+}
+
 /* }================================================================== */
 
 
@@ -495,6 +508,7 @@ static void menu_open (int x, int y) {
   menu_add("Smaller text", "Ctrl -", M_SMALLER);
   menu_add("More transparent", "Ctrl+Shift+wheel", M_MORE_CLEAR);
   menu_add("Less transparent", NULL, M_LESS_CLEAR);
+  menu_add("Blinking cursor", A.cfg.cursor_blink ? "\xE2\x9C\x93" : NULL, M_BLINK);
   menu_add(NULL, NULL, 0);
   menu_add("About " TERM_NAME, NULL, M_ABOUT);
   m->h = 12;
@@ -546,6 +560,7 @@ static void menu_do (int id) {
     case M_SPLIT_RIGHT: split_pane(1); break;
     case M_SPLIT_DOWN: split_pane(0); break;
     case M_CLOSE_PANE: close_pane(CP); break;
+    case M_BLINK: toggle_blink(); break;
     default:
       if (id >= M_THEME && theme_at(id - M_THEME) != NULL)
         set_theme(theme_at(id - M_THEME)->name, 1);
@@ -889,10 +904,52 @@ static int header_mouse (int type, int button, int x, int y) {
 }
 
 
+/* the held tab goes to the place of the tab under the mouse; the others
+** make room */
+static void tab_drag_to (int x) {
+  int i, tx, ty, tw, th, to = -1;
+  Tab *t;
+  if (!A.tab_moving) {
+    if (x - A.tab_drag_x < 6 && A.tab_drag_x - x < 6) return;	/* a shaky click */
+    A.tab_moving = 1;
+  }
+  build_scene();
+  for (i = 0; i < A.ntabs; i++) {
+    draw_tab_rect(&A.frame, &A.scene, i, &tx, &ty, &tw, &th);
+    if (x >= tx && x < tx + tw) to = i;
+  }
+  if (x < 0) to = 0;
+  if (to < 0) {	/* past the last tab (on the + or beyond) */
+    draw_tab_rect(&A.frame, &A.scene, 0, &tx, &ty, &tw, &th);
+    to = (x < tx) ? 0 : A.ntabs - 1;
+  }
+  if (to == A.tab_drag) return;
+  t = A.tabs[A.tab_drag];
+  if (to < A.tab_drag)
+    memmove(&A.tabs[to + 1], &A.tabs[to], (size_t)(A.tab_drag - to) * sizeof(Tab *));
+  else
+    memmove(&A.tabs[A.tab_drag], &A.tabs[A.tab_drag + 1],
+            (size_t)(to - A.tab_drag) * sizeof(Tab *));
+  A.tabs[to] = t;
+  A.cur = A.tab_drag = A.hot_tab = to;
+  A.tab_click = -1;	/* a move is not the first half of a double click */
+  touch();
+}
+
+
 /* returns 1 if the mouse event belonged to the tab bar: a click shows a
-** tab, on its x (or a middle click) closes it, + opens a new one */
+** tab, on its x (or a middle click) closes it, + opens a new one; a tab
+** dragged along the bar takes a new place */
 static int tabbar_mouse (int type, int button, int x, int y) {
   int close, hit;
+  if (A.tab_drag >= 0) {	/* held: the whole window follows it */
+    if (type == TMS_MOVE) tab_drag_to(x);
+    else if (type == TMS_UP && button == 1) {
+      A.tab_drag = -1;
+      A.tab_moving = 0;
+    }
+    return 1;
+  }
   if (A.bar == 0 || A.selecting || A.bar_drag) return 0;
   hit = tab_at(x, y, &close);
   if (hit != A.hot_tab || close != A.hot_close) {
@@ -916,6 +973,11 @@ static int tabbar_mouse (int type, int button, int x, int y) {
       A.tab_click_at = A.now;
       if (twice && hit == A.cur) rename_start();
       else switch_tab(hit);
+      if (!A.renaming) {	/* it may be dragged from here */
+        A.tab_drag = A.cur;
+        A.tab_drag_x = x;
+        A.tab_moving = 0;
+      }
     }
   }
   else if (type == TMS_DOWN && button == 2 && hit >= 0 && hit < A.ntabs) close_tab(hit);
@@ -2093,6 +2155,7 @@ static void close_tab (int i) {
     return;
   }
   t = A.tabs[i];
+  A.tab_drag = -1;
   memmove(&A.tabs[i], &A.tabs[i + 1], (size_t)(A.ntabs - i - 1) * sizeof(Tab *));
   A.ntabs--;
   if (i < A.cur || A.cur == A.ntabs) A.cur--;
@@ -2203,6 +2266,7 @@ void app_on_focus (int on) {
   if (!on) {
     A.menu.open = 0;
     A.selecting = A.bar_drag = 0;
+    A.tab_drag = -1;
     rename_end(1);
   }
   touch();
@@ -2398,7 +2462,13 @@ const Frame *app_render (void) {
   build_scene();
   {
     uint32_t look = look_of(&A.scene);
+    const Scene *s = &A.scene;
     int i, full = !A.frame_ok || look != A.look;
+    /* what floats over the rows (menu, find box, pill, scrollbar) is not
+    ** drawn again with them: while it shows, the whole frame is */
+    if ((s->menu != NULL && s->menu->open) || s->find != NULL || s->pill != NULL ||
+        (s->bar_alpha > 0 && s->g->sb_len > 0 && !s->g->alt))
+      full = 1;
     for (i = 0; i < CUR->npanes && !full; i++) full = CUR->panes[i]->g->all_dirty;
     if (full) draw_scene(&A.frame, &A.scene);
     else if (!draw_scene_rows(&A.frame, &A.scene)) return NULL;	/* nothing changed */
@@ -2491,7 +2561,7 @@ int app_init (const AppArgs *args, const char *argv0) {
     A.cfg.font_size = args->font_size < 6 ? 6 : args->font_size > 72 ? 72 : args->font_size;
   A.custom = win_custom_chrome(!A.cfg.native_titlebar);
   A.hot_button = A.pressed_button = -1;
-  A.hot_tab = A.pressed_close = -1;
+  A.hot_tab = A.pressed_close = A.tab_drag = -1;
   usr = path_join(A.root, "usr");
   share = path_join(usr, "share");
   fonts = path_join(share, "fonts");

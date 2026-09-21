@@ -47,6 +47,7 @@ enum { CK_NAME, CK_DEFAULT, CK_EMPTY, CK_INITIAL };
 static Comp *comps = NULL;
 static size_t ncomps = 0;
 static Comp *running = NULL;	/* the rule whose function is running (compopt) */
+static int from_editor = 0;	/* Tab, not compgen: dirspell may fix folders */
 
 
 static void comp_clear (Comp *c) {
@@ -202,6 +203,13 @@ static void files_matching (const char *word, int dirs_only, Vec *out) {
   char *lookup, *native;
   Vec files;
   size_t i;
+  if (dirpart[0] != '\0' && from_editor && opt_get("dirspell")) {	/* a folder spelt a little wrong */
+    char *fixed = path_spell(dirpart);
+    if (fixed != NULL) {
+      free(dirpart);
+      dirpart = fixed;
+    }
+  }
   if (dirpart[0] == '~' && dirpart[1] == '/') {
     const char *home = var_get("HOME");
     lookup = xstrcat3(home ? home : "", dirpart + 1, "");
@@ -519,7 +527,9 @@ int comp_for_line (const char *line, size_t point, Vec *words, size_t cword,
   for (i = 0; i < words->n; i++)
     var_aset("COMP_WORDS", (long long)i, words->v[i]);
   var_set("COMP_CWORD", ll_to_str((long long)cword, num));
+  from_editor = 1;
   comp_run(c, word, cmd, prev, out, opts);
+  from_editor = 0;
   if (out->n == 0 && (*opts & (COMP_DEFAULT | COMP_BASHDEFAULT)) != 0) return 0;
   return 1;
 }

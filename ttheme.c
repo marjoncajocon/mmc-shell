@@ -143,11 +143,12 @@ static const char *const default_config =
   "# Remove the '#' in front of a line to change it.\n"
   "\n"
   "theme=dark                # dark or light (Ctrl+Shift+L switches)\n"
-  "#font=Hack                # Hack (Hack Nerd Font Mono, comes with mmc: has the\n"
+  "#font=JetBrains Mono      # JetBrains Mono (the Nerd Font, comes with mmc: has the\n"
   "                          # Powerline and Nerd icons), Cascadia Mono, Consolas ...\n"
   "#font_file=/usr/share/fonts/MyFont.ttf   # or any .ttf file\n"
   "font_size=9               # points, like git-bash (Ctrl + and - zoom)\n"
   "font_smoothing=cleartype  # cleartype, gray or stb (Windows; others use stb)\n"
+  "ligatures=yes             # -> != === drawn as one sign, when the font has them\n"
   "cols=100\n"
   "rows=30\n"
   "padding=4                 # space around the text, in pixels\n"
@@ -181,6 +182,7 @@ void config_defaults (Config *c) {
   c->padding = 4;
   c->scrollback = 10000;
   c->cursor_blink = 1;
+  c->ligatures = 1;
   c->opacity = 100;
   c->copy_on_select = 1;
 }
@@ -236,6 +238,7 @@ static void config_set (Config *c, const char *key, const char *v) {
   else if (strcmp(key, "titlebar") == 0)
     c->native_titlebar = (m_stricmp(v, "native") == 0);
   else if (strcmp(key, "cursor_blink") == 0) c->cursor_blink = parse_bool(v);
+  else if (strcmp(key, "ligatures") == 0) c->ligatures = parse_bool(v);
   else if (strcmp(key, "copy_on_select") == 0)
     c->copy_on_select = parse_bool(v);
   else if (strcmp(key, "cursor") == 0)

@@ -89,6 +89,7 @@ Android has no `/tmp`). mmc-term needs X11 or Cocoa, so Android gets the shell.
 | `tvt.c` | escape sequence (VT / xterm) parser |
 | `ttheme.c` | the themes (dark, green, gruvbox, red, light), `mmcterm.conf` |
 | `tfont.c` | finds fonts, rasterizes and caches glyphs (uses `stb_truetype.h`) |
+| `tshape.c` | what stb_truetype does not read: ligatures (GSUB), color emoji (COLR, CBDT, sbix), PNG |
 | `tdraw.c` | software renderer: text, box drawing, cursor, selection, scrollbar, menu |
 | `tapp.c` | keys, mouse selection, clipboard, zoom, menu actions |
 | `tpty.c` | the shell behind the window: ConPTY (Windows) or a pty (Linux, macOS) |
@@ -96,7 +97,7 @@ Android has no `/tmp`). mmc-term needs X11 or Cocoa, so Android gets the shell.
 | `mterm.rc` | Windows only: icon and version details of mmc-term |
 | `ttest.c` | tests of the terminal core, without a window |
 | `stb_truetype.h` | font rasterizer by Sean Barrett, public domain, the only code not written here |
-| `HackNerdFontMono-*.ttf`, `HackNerdFont-LICENSE.md`, `HackNerdFont-README.md` | the default font: [Hack](https://sourcefoundry.org/hack/) v3.003 with the [Nerd Fonts](https://www.nerdfonts.com) v3.5.1 Powerline and icon glyphs (MIT / Bitstream Vera; the icon sets' licenses are in the README); `install` copies it to `usr/share/fonts` |
+| `JetBrainsMonoNerdFontMono-*.ttf`, `JetBrainsMonoNerdFont-OFL.txt`, `JetBrainsMonoNerdFont-README.md` | the default font: [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) v2.304 with its ligatures and the [Nerd Fonts](https://www.nerdfonts.com) v3.5.1 Powerline and icon glyphs (SIL Open Font License 1.1; the icon sets' licenses are in the README); `install` copies it to `usr/share/fonts` |
 | `tests/compat/` | 420 small bash scripts with what real bash printed for them; `tests/run.sh` compares mmc |
 
 ## Install on Windows
@@ -142,6 +143,7 @@ mmc-term --render-test a.bmp draw a sample into an image, no window
 | Alt+arrow, or a click | the pane next to this one gets the keys |
 | drag the line between panes | give one pane more room |
 | Ctrl+Tab / Ctrl+Shift+Tab | next / previous tab (also: click a tab, or the wheel over the tabs) |
+| drag a tab along the bar | put it in another place |
 | Ctrl+Shift+L | next theme: dark (default), green, gruvbox, red, light (remembered; the right-click menu lists them all) |
 | Ctrl+Shift+wheel | see-through window: opacity 30 .. 100 % in steps of 5 (remembered; also in the menu) |
 | F11 or Alt+Enter | full screen |
@@ -156,7 +158,8 @@ click the tab (or *Rename tab* in the menu), type, Enter keeps it, Esc drops
 it, and an empty name gives the program's title back. Your name stays when the
 shell changes its title, and it is also the window title. The `x` (or a middle click)
 closes it, `+` opens one, and a green dot says that a tab you are not looking
-at printed something. When the program of a tab ends (`exit`), the tab
+at printed something. Drag a tab left or right to change the order; the
+others make room as it passes them. When the program of a tab ends (`exit`), the tab
 closes; with `--hold` the first tab stays to show how it ended.
 
 On Windows mmc-term draws its own title bar: the logo, the title, and three
@@ -172,18 +175,19 @@ Cmd+W (close tab), Cmd+L (theme), Cmd +/-.
 Settings are in `/etc/mmcterm.conf` of the mmc folder (written on the first
 start, every line is explained there): `theme`, `font`, `font_file`,
 `font_size`, `cols`, `rows`, `padding`, `titlebar`, `bold` (`no` draws bold
-text in the normal weight), `scrollback`, `cursor`, `cursor_blink`,
+text in the normal weight), `scrollback`, `cursor`, `cursor_blink` (also
+*Blinking cursor* in the menu: a steady cursor never redraws), `ligatures`,
 `opacity`, `copy_on_select`, `shell`, and your own colors (`bg`, `fg`,
 `cursor_color`, `color0` … `color15`), `font_size` (points, 9 like git-bash)
 and `font_smoothing`.
 
-**Fonts.** The default font is **Hack** in its Nerd Font version, which comes
+**Fonts.** The default font is **JetBrains Mono** in its Nerd Font version, which comes
 with mmc in `/usr/share/fonts` of the mmc folder; fonts in that folder are
 found first, so a font travels with mmc. It has the Powerline symbols and the
 Nerd Font icons (git branch, folders, languages, systems), and it is also the
 fallback for icons when another font is chosen. Without it mmc-term takes
 Cascadia / Consolas (Windows), DejaVu Sans Mono (Linux) or Menlo (macOS). When
-you copy a program from `dist/` by hand, copy the `HackNerdFontMono-*.ttf`
+you copy a program from `dist/` by hand, copy the `JetBrainsMonoNerdFontMono-*.ttf`
 files to `usr/share/fonts` too.
 
 **Smooth text.** On Windows the letters are drawn by Windows itself (GDI),
@@ -198,6 +202,23 @@ pixels, so the tops of the lowercase letters are sharp instead of smeared
 over two rows (FreeType's "light" hinting). Powerline arrows, rounds and slants (U+E0B0..E0BF), box
 drawing and block characters are drawn as geometry, so they fill their cells
 exactly and prompt segments join without seams at every size and zoom.
+
+**Ligatures.** A font that joins `->` `=>` `!=` `===` `<=` and friends into
+one sign (JetBrains Mono - the default -, Cascadia Code, Fira Code) does it in mmc-term too: its `calt` and `liga` rules (OpenType GSUB)
+are read by mmc itself, the letters stay one per cell, and the cell under
+the cursor is always shown as typed. `ligatures=no`
+turns them off. With `font_smoothing=cleartype` or `gray` a style gets
+ligatures only when Windows draws it from the same font file (a family with
+an italic file of its own draws its italic without them); `stb` has them in
+every style.
+
+**Color emoji.** Emoji come in color, from the system's emoji font: Segoe UI
+Emoji on Windows (layers of colored shapes, COLR), Noto Color Emoji on Linux
+and Apple Color Emoji on macOS (pictures, CBDT and sbix, with mmc's own small
+PNG reader). Skin tones and ZWJ sequences (`👨‍💻`, families) become one
+picture when the font has one. A symbol that also exists as text (`❤`, `☺`)
+stays in the text color unless U+FE0F asks for the emoji (`❤️`). Tested on
+Windows; the Linux and macOS picture fonts are not tried yet.
 
 How it is made: one shared core draws the *whole* terminal — text, box drawing
 characters, cursor, selection, scrollbar, even the menu — into a plain pixel
@@ -261,11 +282,15 @@ starts in the folder of the pane it came from); when its shell ends the
 pane goes and its neighbor takes the room. Only the rows that changed are
 drawn again (typing redraws one line, not the window: about 20 times less
 work), and the picture is the same as a whole one (`ttest` checks it;
-`ttest bench` measures it).
+`ttest bench` measures it). Only those rows go to the screen too, on every
+system: a blinking cursor or a typed letter copies a few rows of pixels,
+not the whole window (a steady cursor, *Blinking cursor* off in the menu,
+copies nothing at all while nothing happens).
 
-Not there (yet): color emoji (they are drawn in one color), ligatures,
-moving tabs by dragging, the kitty image protocol, drawing on the GPU
-(the software renderer is fast enough and needs nothing from the system).
+Not there (yet): the kitty image protocol, flags (two regional letters stay
+two letters; Windows' emoji font has no flags anyway), keycaps in color
+(`1️⃣`: Segoe UI Emoji draws those in one color), drawing on the GPU (the
+software renderer is fast enough and needs nothing from the system).
 
 ## Settings
 
@@ -316,7 +341,7 @@ lines, and a red `[✗]` after a command that failed:
 
 `export MMC_PROMPT=...` in `/etc/profile` or `~/.mmcrc` changes it:
 `classic` is the one line git-bash style prompt, `powerline` draws colored
-segments with arrows and the git branch icon (it needs the Hack Nerd Font,
+segments with arrows and the git branch icon (it needs a Nerd Font, like the JetBrains Mono one,
 which mmc-term has), and `ps1` uses your own `$PS1` with bash's `\u \h \w \$`
 escapes. A continued command line shows `$PS2` (`> `).
 
@@ -486,12 +511,23 @@ it. A pipeline whose reader stops early (`yes | head -1`) ends at once on
 Windows too, as SIGPIPE does elsewhere.
 `ulimit` reports what mmc has and says so when it cannot change a limit.
 `shopt` options that work: `autocd`, `cdable_vars`, `cdspell` (a folder
-name one letter off is corrected), `checkjobs`, `execfail`, `extdebug` (it
-fills `BASH_ARGV` and `BASH_ARGC`), `extglob`, `globskipdots`, `globstar`,
+name one letter off is corrected, every part of the path), `checkjobs`,
+`dirspell` (the same for the folder part of a word when Tab completes it),
+`execfail`, `extdebug` (it fills `BASH_ARGV` and `BASH_ARGC` for every
+call; without it they hold the script's arguments, as in bash), `extglob`,
+`globskipdots`, `globstar`, `gnu_errfmt` (errors read `file:3: message`),
 `huponexit`, `histappend`, `inherit_errexit` (without it `set -e` is off
-inside `$( )`, as in bash), `lastpipe`, `localvar_inherit`, `nullglob`,
-`dotglob`, `nocaseglob` and `nocasematch`. Accepted but doing nothing:
-`dirspell`, `localvar_unset`, `gnu_errfmt` and the `compat*` ones.
+inside `$( )`, as in bash), `lastpipe`, `localvar_inherit`,
+`localvar_unset` (without it, `unset` of a caller's local shows the
+global again, as in bash), `nullglob`, `dotglob`, `nocaseglob` and
+`nocasematch`. The compatibility level works too: `compat31` ...
+`compat44` (one at a time) or `BASH_COMPAT` (`4.2` or `42`, up to 52):
+compat31 makes a quoted `=~` pattern a regex again, compat42 keeps quotes
+in the replacement of `"${x/p/r}"`, compat43 lets `break` in a function
+end the caller's loop, compat44 lets `break` leave a `( )` subshell and
+`v=1 export v` on a local set the global too. `[[ < ]]` always compares
+bytes, so compat32 and compat40 change nothing; the posix-mode parts of
+compat41 to compat43 are not there.
 
 Also there: `local -` (the `set` options come back when the function
 returns), `caller` and `caller N`, `GLOBIGNORE`, `HISTCMD`, `BASH_XTRACEFD`,
@@ -533,4 +569,4 @@ Two things in this folder were made by others and keep their own license:
 | Part | By | License |
 |---|---|---|
 | `stb_truetype.h` | Sean Barrett | MIT or public domain, at your choice; the text is at the end of the file |
-| `HackNerdFontMono-*.ttf` | Source Foundry Authors, Bitstream Inc.; icons: the Nerd Fonts project and the icon set authors | MIT and Bitstream Vera License, see `HackNerdFont-LICENSE.md`; the icon sets' licenses are listed in `HackNerdFont-README.md`; the font may travel with a program, it may not be sold on its own |
+| `JetBrainsMonoNerdFontMono-*.ttf` | JetBrains s.r.o.; icons: the Nerd Fonts project and the icon set authors | SIL Open Font License 1.1, see `JetBrainsMonoNerdFont-OFL.txt`; the icon sets' licenses are listed in `JetBrainsMonoNerdFont-README.md`; the font may travel with a program, it may not be sold on its own |

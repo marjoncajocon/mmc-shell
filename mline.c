@@ -416,6 +416,13 @@ static void complete_files (const char *word, Vec *out) {
   char *lookup, *native;
   Vec files;
   size_t i;
+  if (dirpart[0] != '\0' && opt_get("dirspell")) {	/* a folder spelt a little wrong */
+    char *fixed = path_spell(dirpart);
+    if (fixed != NULL) {
+      free(dirpart);
+      dirpart = fixed;
+    }
+  }
   if (dirpart[0] == '~' && dirpart[1] == '/') {
     const char *home = var_get("HOME");
     lookup = xstrcat3(home ? home : "", dirpart + 1, "");
@@ -593,7 +600,9 @@ static void ed_complete (Edit *e) {
   }
   if (!(copts & COMP_NOSORT)) vec_sort(&cands);
   keep = common_prefix(&cands);
-  if (cands.n > 1 && keep <= strlen(word.s)) {
+  /* several: show them, unless dirspell fixed the folder part */
+  if (cands.n > 1 && keep <= strlen(word.s) &&
+      (from_rule || m_fnncmp(cands.v[0], word.s, keep) == 0)) {
     ed_leave(e);
     show_candidates(&cands);
     buf_free(&word);

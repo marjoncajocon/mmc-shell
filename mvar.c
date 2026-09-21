@@ -157,7 +157,11 @@ static Var *find_any (const char *name, Scope **where) {
 /* follows "declare -n ref=target" */
 static Var *resolve (const char *name, const char **real) {
   int depth;
-  Var *v = find_any(name, NULL);
+  Var *v;
+  if (func_depth == 0 && name[0] == 'B' && strncmp(name, "BASH_ARG", 8) == 0 &&
+      (strcmp(name + 8, "V") == 0 || strcmp(name + 8, "C") == 0))
+    sh_args_touch();	/* bash fills them when first used outside a function */
+  v = find_any(name, NULL);
   *real = name;
   for (depth = 0; v != NULL && (v->flags & V_NAMEREF) && v->val != NULL &&
                   depth < 8; depth++) {
@@ -302,6 +306,7 @@ int var_set (const char *name, const char *value) {
     v->val = norm;
     var_path_changed();
   }
+  if (strcmp(v->name, "BASH_COMPAT") == 0) sh_compat_var(v->val);
   return 0;
 }
 
@@ -345,7 +350,10 @@ int var_unset (const char *name) {
   find_any(v->name, &where);
   if (where != NULL) {
     int path = strcmp(v->name, "PATH") == 0;
-    if (where != &global_scope) {	/* a local: stays local, but unset */
+    int compat = strcmp(v->name, "BASH_COMPAT") == 0;
+    /* a local of this function stays local, but unset; one of a caller
+    ** goes, showing what it hid, unless shopt -s localvar_unset */
+    if (where != &global_scope && (where == top || opt_get("localvar_unset"))) {
       free(v->val);
       v->val = NULL;
       elems_clear(v);
@@ -353,6 +361,7 @@ int var_unset (const char *name) {
     }
     else scope_remove(where, v->name);
     if (path) var_path_changed();
+    if (compat) sh_compat_var(var_get("BASH_COMPAT"));
   }
   return 0;
 }
@@ -369,6 +378,22 @@ int var_unset_local (const char *name) {
   }
   scope_remove(where, name);
   return 0;
+}
+
+
+/* compat44: "v=1 export v" on a local also sets the global v */
+void var_copy_global (const char *name) {
+  Scope *where = NULL;
+  Var *v = find_any(name, &where), *g;
+  if (v == NULL || where == &global_scope || (v->flags & (V_ARRAY | V_ASSOC | V_NAMEREF | V_SPECIAL)))
+    return;
+  g = scope_find(&global_scope, name);
+  if (g == NULL) g = scope_add(&global_scope, name);
+  else if (g->flags & (V_READONLY | V_SPECIAL)) return;
+  elems_clear(g);
+  free(g->val);
+  g->val = v->val ? xstrdup(v->val) : NULL;
+  g->flags = v->flags;
 }
 
 
@@ -913,6 +938,7 @@ void var_init (void) {
     v->flags = V_EXPORT;
   }
   vec_free(&env);
+  if (var_get("BASH_COMPAT") != NULL) sh_compat_var(var_get("BASH_COMPAT"));
   rand_state = (unsigned long)(os_now_us() ^ (long long)os_getpid() * 2654435761u);
   seconds_base = os_now_us() / 1000000;
   for (i = 0; specials[i] != NULL; i++) {

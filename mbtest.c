@@ -399,8 +399,9 @@ static int cond_node (Node *n, int *err) {
         free(pat);
       }
       else if (strcmp(op, "=~") == 0) {
-        char *m = expand_pattern(n->words[1]);
-        char *re_src = marked_to_regex(m);
+        /* compat31: quoting the right side does not make it literal */
+        char *m = sh_compat() <= 31 ? expand_str(n->words[1]) : expand_pattern(n->words[1]);
+        char *re_src = sh_compat() <= 31 ? xstrdup(m) : marked_to_regex(m);
         char *emsg = NULL;
         Regex *re = regex_compile(re_src, O("nocasematch"), &emsg);
         free(m);

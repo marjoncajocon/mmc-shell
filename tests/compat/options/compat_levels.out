@@ -1,0 +1,25 @@
+start: unset
+compat42: 42
+compat31            	off
+compat42            	on
+compat43            	off
+compat31: 31
+compat31            	on
+compat42            	off
+unset other: 31
+compat31            	on
+0
+compat43            	on
+4.3
+compat43            	off
+compat44            	on
+compat32            	on
+0
+compat41            	off
+unset
+compat40            	off
+bad: 99
+compat42            	off
+0
+status 1
+status: 0

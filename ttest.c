@@ -3,8 +3,9 @@
 **
 **   ttest                   run the checks
 **   ttest replay FILE       feed a captured terminal stream, print the screen
-**   ttest render OUT.bmp [light|dark] [FONT|-] [POINTS] [cleartype|gray|stb]
-**                                       draw a sample screen to an image
+**   ttest render OUT.bmp [light|dark] [FONT|-] [POINTS] [cleartype|gray|stb] [TEXT]
+**                                       draw a sample screen to an image (the
+**                                       TEXT file instead of the demo)
 */
 
 #include "mterm.h"
@@ -494,7 +495,7 @@ static const char *const demo =
 
 
 static int render (const char *out, const char *theme_name, const char *font,
-                   int size, const char *smooth) {
+                   int size, const char *smooth, const char *text_file) {
   Config c;
   Theme th;
   Grid *g;
@@ -504,7 +505,9 @@ static int render (const char *out, const char *theme_name, const char *font,
   Menu m;
   int i;
   config_defaults(&c);
-  if (font != NULL && strcmp(font, "-") != 0)
+  if (font != NULL && (strchr(font, '/') != NULL || strchr(font, '\\') != NULL))
+    strncpy(c.font_file, font, sizeof(c.font_file) - 1);	/* a file */
+  else if (font != NULL && strcmp(font, "-") != 0)
     strncpy(c.font, font, sizeof(c.font) - 1);
   if (size > 0) c.font_size = size;
   if (smooth != NULL)
@@ -520,7 +523,17 @@ static int render (const char *out, const char *theme_name, const char *font,
   vt_init(&vt, g);
   for (i = 0; i < 40; i++) vt_feed(&vt, "history line\r\n", 14);
   vt_feed(&vt, "\033[2J\033[H", 7);
-  vt_feed(&vt, demo, strlen(demo));
+  if (text_file != NULL) {	/* what the file says, instead of the demo */
+    size_t len = 0;
+    char *text = read_file(text_file, &len);
+    if (text == NULL) {
+      printf("cannot read %s\n", text_file);
+      return 1;
+    }
+    vt_feed(&vt, text, len);
+    free(text);
+  }
+  else vt_feed(&vt, demo, strlen(demo));
   memset(&s, 0, sizeof(s));
   memset(&m, 0, sizeof(m));
   s.g = g;
@@ -837,18 +850,203 @@ static int bench (void) {
 }
 
 
+/* small pictures made with Python's zlib: RGBA with every row filter, RGB
+** big enough for dynamic Huffman codes, a 4 bit palette with alpha */
+static const unsigned char png_rgba[139] = {
+  137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+  0, 0, 0, 5, 0, 0, 0, 5, 8, 6, 0, 0, 0, 141, 111, 38,
+  229, 0, 0, 0, 82, 73, 68, 65, 84, 120, 218, 77, 202, 161, 21, 128,
+  48, 16, 4, 209, 9, 160, 162, 99, 206, 196, 96, 162, 175, 166, 20, 66,
+  21, 180, 65, 17, 24, 58, 160, 8, 208, 177, 100, 65, 33, 190, 153, 55,
+  0, 143, 195, 85, 225, 92, 97, 63, 96, 11, 248, 27, 227, 253, 55, 40,
+  130, 71, 73, 146, 165, 48, 82, 89, 204, 82, 51, 51, 201, 50, 183, 233,
+  59, 209, 137, 78, 116, 82, 232, 228, 74, 19, 233, 112, 206, 61, 134, 0,
+  0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+};
+static const unsigned char png_rgb[1130] = {
+  137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+  0, 0, 0, 64, 0, 0, 0, 64, 8, 2, 0, 0, 0, 37, 11, 230,
+  137, 0, 0, 4, 49, 73, 68, 65, 84, 120, 218, 237, 154, 49, 104, 27,
+  87, 28, 135, 253, 239, 139, 249, 16, 135, 17, 70, 24, 97, 132, 16, 66,
+  24, 97, 140, 16, 70, 24, 35, 132, 17, 33, 152, 16, 76, 8, 38, 24,
+  19, 130, 9, 193, 152, 96, 66, 48, 33, 152, 16, 76, 134, 76, 157, 58,
+  117, 234, 212, 169, 83, 167, 78, 157, 58, 148, 14, 29, 58, 116, 232, 208,
+  161, 67, 41, 30, 60, 120, 48, 69, 131, 40, 71, 249, 87, 126, 109, 201,
+  163, 245, 19, 126, 216, 79, 58, 199, 6, 13, 199, 113, 28, 150, 127, 254,
+  221, 119, 31, 63, 223, 154, 152, 152, 64, 4, 35, 76, 10, 8, 57, 33,
+  17, 166, 132, 188, 48, 45, 20, 132, 25, 161, 40, 204, 10, 37, 161, 44,
+  84, 132, 170, 80, 19, 230, 132, 186, 48, 47, 44, 8, 13, 161, 41, 44,
+  10, 45, 97, 73, 88, 22, 218, 66, 71, 88, 17, 186, 194, 109, 225, 142,
+  176, 42, 220, 21, 238, 9, 107, 194, 125, 225, 129, 176, 46, 60, 20, 54,
+  132, 77, 225, 145, 240, 88, 216, 18, 158, 8, 79, 133, 109, 97, 71, 120,
+  38, 236, 10, 207, 133, 23, 194, 158, 240, 82, 120, 37, 236, 11, 175, 133,
+  55, 194, 129, 240, 86, 196, 12, 126, 122, 81, 140, 97, 82, 193, 144, 83,
+  18, 195, 148, 146, 55, 76, 43, 5, 195, 140, 82, 52, 204, 42, 37, 67,
+  89, 169, 24, 170, 74, 205, 48, 167, 212, 13, 243, 202, 130, 161, 161, 52,
+  13, 139, 74, 203, 176, 164, 44, 27, 218, 74, 199, 176, 162, 116, 13, 183,
+  149, 59, 134, 85, 229, 174, 225, 158, 178, 102, 184, 175, 60, 48, 172, 43,
+  15, 13, 27, 202, 166, 225, 145, 242, 216, 176, 165, 60, 49, 60, 85, 182,
+  13, 59, 202, 51, 195, 174, 242, 220, 240, 66, 217, 51, 188, 84, 94, 25,
+  246, 149, 215, 134, 55, 202, 129, 225, 173, 222, 50, 167, 223, 225, 35, 35,
+  127, 218, 131, 232, 199, 92, 246, 61, 37, 55, 248, 221, 159, 38, 160, 54,
+  1, 108, 2, 106, 19, 192, 38, 160, 54, 1, 108, 2, 106, 19, 192, 38,
+  160, 54, 1, 108, 2, 106, 19, 192, 38, 160, 54, 1, 108, 2, 106, 19,
+  192, 38, 160, 54, 1, 108, 2, 106, 19, 192, 38, 160, 54, 1, 108, 2,
+  106, 19, 192, 38, 160, 54, 1, 108, 2, 106, 19, 192, 38, 160, 54, 1,
+  108, 2, 234, 38, 240, 247, 215, 250, 227, 223, 3, 137, 113, 158, 8, 247,
+  151, 252, 228, 164, 211, 129, 212, 233, 64, 226, 116, 32, 117, 58, 144, 56,
+  29, 72, 157, 14, 36, 78, 7, 82, 167, 3, 137, 211, 129, 212, 233, 64,
+  226, 116, 32, 117, 58, 144, 56, 29, 72, 157, 14, 36, 78, 7, 210, 49,
+  116, 128, 56, 247, 151, 153, 193, 223, 253, 251, 14, 168, 211, 129, 188, 211,
+  1, 117, 58, 144, 119, 58, 160, 78, 7, 242, 78, 7, 212, 233, 64, 222,
+  233, 128, 58, 29, 200, 59, 29, 80, 167, 3, 121, 167, 3, 234, 116, 32,
+  239, 116, 64, 125, 29, 112, 63, 191, 159, 117, 82, 178, 118, 189, 148, 114,
+  57, 15, 7, 122, 30, 14, 20, 60, 28, 232, 121, 56, 80, 240, 112, 160,
+  231, 225, 64, 193, 195, 129, 94, 38, 56, 112, 249, 29, 168, 38, 137, 135,
+  3, 125, 15, 7, 138, 30, 14, 244, 61, 28, 40, 122, 56, 208, 247, 112,
+  160, 232, 225, 64, 127, 252, 28, 136, 113, 94, 234, 83, 83, 30, 14, 164,
+  30, 14, 148, 60, 28, 72, 61, 28, 40, 121, 56, 144, 122, 56, 80, 242,
+  112, 32, 29, 51, 7, 98, 117, 160, 49, 120, 222, 159, 205, 1, 245, 112,
+  160, 226, 225, 128, 122, 56, 80, 241, 112, 64, 61, 28, 168, 120, 56, 160,
+  161, 28, 240, 125, 126, 59, 255, 197, 12, 123, 174, 95, 194, 253, 79, 19,
+  104, 77, 79, 7, 250, 192, 97, 160, 15, 212, 2, 125, 224, 48, 43, 62,
+  192, 104, 58, 208, 46, 20, 2, 125, 224, 40, 208, 7, 234, 129, 62, 112,
+  148, 9, 31, 96, 100, 28, 232, 206, 204, 4, 250, 192, 113, 160, 15, 44,
+  4, 250, 192, 113, 70, 125, 32, 86, 7, 86, 139, 197, 64, 31, 56, 9,
+  244, 129, 102, 160, 15, 156, 92, 51, 31, 88, 155, 157, 13, 244, 129, 94,
+  160, 15, 180, 2, 125, 160, 119, 141, 124, 96, 240, 172, 147, 245, 82, 41,
+  208, 7, 250, 129, 62, 176, 28, 232, 3, 253, 113, 248, 64, 227, 2, 207,
+  245, 141, 139, 113, 96, 179, 92, 14, 244, 129, 52, 208, 7, 58, 129, 62,
+  144, 142, 205, 7, 24, 11, 7, 182, 6, 239, 247, 97, 62, 160, 129, 62,
+  208, 13, 244, 1, 141, 237, 3, 195, 95, 253, 255, 255, 249, 246, 226, 55,
+  31, 230, 3, 219, 213, 106, 228, 125, 224, 187, 43, 176, 15, 48, 198, 119,
+  161, 221, 90, 45, 242, 62, 240, 253, 135, 179, 15, 92, 202, 121, 254, 195,
+  129, 189, 185, 185, 200, 251, 192, 15, 31, 200, 62, 16, 201, 179, 101, 191,
+  94, 143, 188, 15, 252, 120, 179, 15, 252, 115, 253, 153, 168, 145, 131, 249,
+  249, 200, 251, 192, 79, 55, 251, 192, 80, 14, 188, 91, 88, 136, 188, 15,
+  252, 156, 209, 125, 128, 140, 236, 3, 31, 55, 26, 145, 247, 129, 95, 178,
+  184, 15, 144, 157, 14, 124, 210, 108, 70, 222, 7, 126, 205, 220, 62, 64,
+  240, 91, 123, 204, 125, 224, 211, 197, 197, 200, 251, 192, 225, 85, 221, 7,
+  70, 227, 217, 242, 89, 171, 21, 121, 31, 56, 186, 146, 251, 192, 200, 254,
+  191, 72, 62, 95, 90, 138, 188, 15, 28, 95, 211, 125, 224, 156, 158, 45,
+  95, 44, 47, 71, 222, 7, 78, 110, 246, 129, 161, 251, 192, 151, 237, 118,
+  228, 125, 160, 151, 137, 125, 128, 204, 250, 192, 87, 157, 78, 228, 125, 160,
+  63, 254, 125, 224, 253, 243, 184, 60, 66, 14, 236, 156, 207, 7, 190, 94,
+  89, 137, 188, 15, 164, 99, 222, 7, 200, 184, 19, 127, 211, 237, 70, 222,
+  7, 52, 234, 62, 240, 23, 87, 179, 180, 110, 24, 223, 209, 48, 0, 0,
+  0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+};
+static const unsigned char png_pal[107] = {
+  137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82,
+  0, 0, 0, 3, 0, 0, 0, 2, 4, 3, 0, 0, 0, 111, 90, 123,
+  41, 0, 0, 0, 9, 80, 76, 84, 69, 255, 0, 0, 0, 255, 0, 0,
+  0, 255, 45, 74, 205, 138, 0, 0, 0, 3, 116, 82, 78, 83, 255, 128,
+  0, 127, 109, 104, 120, 0, 0, 0, 14, 73, 68, 65, 84, 120, 218, 99,
+  96, 84, 96, 80, 100, 0, 0, 0, 205, 0, 67, 122, 88, 219, 173, 0,
+  0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+};
+
+static uint32_t png_at (const uint32_t *img, int w, int x, int y) {
+  return img[y * w + x];
+}
+
+
+/* PNG pictures (color emoji of Linux and macOS), ligatures and color emoji
+** with the fonts of this system (skipped when it has none of them) */
+static void test_shaping (void) {
+  Config c;
+  uint32_t *img;
+  int w = 0, h = 0;
+
+  img = png_decode(png_rgba, sizeof(png_rgba), &w, &h);
+  check_int("png rgba decodes", img != NULL && w == 5 && h == 5, 1);
+  if (img != NULL) {
+    check_int("png rgba pixel", (long)png_at(img, w, 3, 2), 0xC396643CL);
+    check_int("png rgba last pixel", (long)png_at(img, w, 4, 4), 0xAFC8C8A0L);
+    free(img);
+  }
+  img = png_decode(png_rgb, sizeof(png_rgb), &w, &h);
+  check_int("png rgb decodes", img != NULL && w == 64 && h == 64, 1);
+  if (img != NULL) {
+    check_int("png rgb pixel", (long)png_at(img, w, 10, 5), 0xFF55690FL);
+    check_int("png rgb last pixel", (long)png_at(img, w, 63, 63), 0xFF76C000L);
+    free(img);
+  }
+  img = png_decode(png_pal, sizeof(png_pal), &w, &h);
+  check_int("png palette decodes", img != NULL && w == 3 && h == 2, 1);
+  if (img != NULL) {
+    check_int("png palette, half see-through", (long)png_at(img, w, 1, 0), 0x8000FF00L);
+    check_int("png palette, see-through", (long)png_at(img, w, 0, 1), 0x000000FFL);
+    check_int("png palette, second row", (long)png_at(img, w, 2, 1), 0xFFFF0000L);
+    free(img);
+  }
+  check_int("broken png", png_decode(png_rgb, 60, &w, &h) == NULL, 1);
+
+  config_defaults(&c);
+  strcpy(c.font, "Cascadia Code");
+  c.smoothing = SMOOTH_STB;
+  if (font_init(&c) == 0 && strcmp(font_name(), "Cascadia Code") == 0) {
+    static const uint32_t arrow[3] = {'a', '-', '>'}, plain_text[3] = {'a', 'b', 'c'};
+    uint16_t plain[8], out[8];
+    int cells[8], n;
+    font_set_px(20.0f);
+    check_int("Cascadia Code has ligatures", font_has_ligatures(0, 0), 1);
+    n = font_shape(arrow, 3, 0, 0, plain, out, cells, 8);
+    check_int("-> is shaped", n > 0 && (out[1] != plain[1] || out[2] != plain[2]), 1);
+    check_int("a stays a", n > 0 && out[0] == plain[0] && cells[0] == 0, 1);
+    n = font_shape(plain_text, 3, 0, 0, plain, out, cells, 8);
+    check_int("abc stays abc", n == 3 && out[0] == plain[0] && out[1] == plain[1] &&
+              out[2] == plain[2], 1);
+    c.ligatures = 0;
+    font_init(&c);
+    check_int("ligatures=no", font_has_ligatures(0, 0), 0);
+  }
+  else printf("(Cascadia Code not here: ligature checks skipped)\n");
+
+  config_defaults(&c);
+  c.smoothing = SMOOTH_STB;
+  if (font_init(&c) == 0) {
+    static const uint32_t tech[3] = {0x1F468, 0x200D, 0x1F4BB};
+    static const uint32_t heart[2] = {0x2764, 0xFE0F};
+    const Glyph *g;
+    font_set_px(20.0f);
+    g = font_glyph(0x1F600, 0, 0, 0);
+    if (g->lcd == 3) {
+      const uint32_t *px = (const uint32_t *)(const void *)g->bm;
+      int k, colors = 0;
+      uint32_t first = 0;
+      for (k = 0; k < g->w * g->h; k++)
+        if ((px[k] >> 24) == 255) {
+          if (first == 0) first = px[k];
+          else if (px[k] != first) colors = 1;
+        }
+      check_int("emoji in more than one color", colors, 1);
+      check_int("emoji fits its two cells", g->w <= 2 * font_cell_w() && g->h <= font_cell_h(), 1);
+      g = font_emoji(tech, 3, 2);
+      check_int("ZWJ emoji is one picture", g != NULL && g->lcd == 3, 1);
+      g = font_emoji(heart, 2, 1);
+      check_int("heart + FE0F in color", g != NULL && g->lcd == 3, 1);
+      check_int("a letter has no color", font_glyph('A', 0, 0, 0)->lcd, 0);
+    }
+    else printf("(no color emoji font here: emoji checks skipped)\n");
+  }
+}
+
+
 int main (int argc, char **argv) {
   if (argc >= 2 && strcmp(argv[1], "bench") == 0) return bench();
   if (argc >= 3 && strcmp(argv[1], "replay") == 0) return replay(argv[2]);
   if (argc >= 3 && strcmp(argv[1], "render") == 0)
     return render(argv[2], argc > 3 ? argv[3] : "dark", argc > 4 ? argv[4] : NULL,
-                  argc > 5 ? atoi(argv[5]) : 0, argc > 6 ? argv[6] : NULL);
+                  argc > 5 ? atoi(argv[5]) : 0, argc > 6 ? argv[6] : NULL,
+                  argc > 7 ? argv[7] : NULL);
   test_core();
   test_modes();
   test_contrast();
   test_powerline();
   test_clusters_links();
   test_partial();
+  test_shaping();
   printf("%d checks, %d failed\n", checks, failures);
   return failures ? 1 : 0;
 }

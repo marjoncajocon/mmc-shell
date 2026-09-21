@@ -253,15 +253,6 @@ static int change_dir (const char *target, int quiet) {
 }
 
 
-static char *home_tilde (const char *p, int longform) {
-  const char *home = var_get("HOME");
-  size_t n = home ? strlen(home) : 0;
-  if (!longform && n > 0 && strncmp(p, home, n) == 0 && (p[n] == '\0' || p[n] == '/'))
-    return xstrcat3("~", p + n, "");
-  return xstrdup(p);
-}
-
-
 /* is b one edit away from a (a letter wrong, missing, extra, or two swapped)? */
 static int one_off (const char *a, const char *b) {
   size_t la = strlen(a), lb = strlen(b), i = 0;
@@ -277,35 +268,94 @@ static int one_off (const char *a, const char *b) {
 }
 
 
-/* shopt -s cdspell: a folder that is not there, spelt a little wrong */
-static char *cd_spell (const char *target) {
-  char *native = path_to_native(target), *dir, *base, *ndir, *found = NULL;
-  const char *slash = strrchr(target, '/');
-  OsStat st;
+/* a shown path ("~/x", "/d/env", "a/b") as a native one; "" is "." */
+static char *spell_native (const char *shown) {
+  const char *home = var_get("HOME");
+  char *full, *r;
+  if (shown[0] == '\0') return path_to_native(".");
+  if (shown[0] == '~' && (shown[1] == '\0' || shown[1] == '/') && home != NULL)
+    full = xstrcat3(home, shown + 1, "");
+  else full = xstrdup(shown);
+  r = path_to_native(full);
+  free(full);
+  return r;
+}
+
+
+/* a folder in 'dir' (shown form) whose name is one edit away from 'part' */
+static char *spell_part (const char *dir, const char *part) {
+  char *ndir = spell_native(dir), *found = NULL;
   Vec names;
   size_t k;
-  if (os_stat(native, &st) == 0) {
-    free(native);
-    return NULL;
-  }
-  free(native);
-  dir = slash ? xstrndup(target, (size_t)(slash - target + 1)) : xstrdup("");
-  base = xstrdup(slash ? slash + 1 : target);
-  ndir = path_to_native(dir[0] ? dir : ".");
   vec_init(&names);
   os_listdir(ndir, &names);
   for (k = 0; k < names.n && found == NULL; k++) {
+    OsStat st;
     char *full;
-    if (!one_off(base, names.v[k])) continue;
+    if (!one_off(part, names.v[k])) continue;
     full = path_join(ndir, names.v[k]);
-    if (os_stat(full, &st) == 0 && st.is_dir) found = xstrcat3(dir, names.v[k], "");
+    if (os_stat(full, &st) == 0 && st.is_dir) found = xstrdup(names.v[k]);
     free(full);
   }
   vec_free(&names);
   free(ndir);
-  free(dir);
-  free(base);
   return found;
+}
+
+
+/*
+** Every part of 'path' that is not there is replaced by a folder whose
+** name is one letter off (like bash's spname). NULL when the path is
+** there already or a part cannot be fixed.
+*/
+char *path_spell (const char *path) {
+  Buf out;
+  const char *p = path;
+  int fixed = 0;
+  buf_init(&out);
+  while (*p == '/') buf_putc(&out, *p++);
+  while (*p != '\0') {
+    const char *e = strchr(p, '/');
+    size_t n = e ? (size_t)(e - p) : strlen(p);
+    char *part = xstrndup(p, n), *cand, *native;
+    OsStat st;
+    int ok;
+    cand = xstrcat3(out.s ? out.s : "", part, "");
+    native = spell_native(cand);
+    ok = (strcmp(part, ".") == 0 || strcmp(part, "..") == 0 ||
+          (out.len == 0 && part[0] == '~') || os_stat(native, &st) == 0);
+    free(native);
+    free(cand);
+    if (!ok) {
+      char *fix = spell_part(out.s ? out.s : "", part);
+      if (fix == NULL) {
+        free(part);
+        buf_free(&out);
+        return NULL;
+      }
+      free(part);
+      part = fix;
+      fixed = 1;
+    }
+    buf_puts(&out, part);
+    free(part);
+    if (e == NULL) break;
+    for (p = e; *p == '/'; p++) buf_putc(&out, '/');
+  }
+  if (!fixed) {
+    buf_free(&out);
+    return NULL;
+  }
+  return buf_take(&out);
+}
+
+
+static char *home_tilde (const char *p, int longform) {
+  const char *home = var_get("HOME");
+  size_t n = home ? strlen(home) : 0;
+  if (!longform && n > 0 && strncmp(p, home, n) == 0 && (p[n] == '\0' || p[n] == '/'))
+    return xstrcat3("~", p + n, "");
+  return xstrdup(p);
 }
 
 
@@ -351,7 +401,7 @@ static int b_cd (int argc, char **argv, int in, int out, int err) {
     free(native);
   }
   if (opt_get("cdspell") && sh_interactive) {	/* one letter wrong, missing, extra or swapped */
-    char *fixed = cd_spell(target);
+    char *fixed = path_spell(target);
     if (fixed != NULL) {
       fd_printf(out, "%s\n", fixed);
       i = change_dir(fixed, 0);
