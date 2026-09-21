@@ -122,6 +122,7 @@ void grid_reset (Grid *g) {
   g->autowrap = 1;
   g->cursor_on = 1;
   g->app_cursor = g->bracketed = g->focus_events = g->insert = 0;
+  g->mouse = g->mouse_sgr = 0;
   g->cursor_shape = 0;
   g->view = 0;
   memset(g->saved_cx, 0, sizeof(g->saved_cx));

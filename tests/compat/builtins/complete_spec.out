@@ -1,0 +1,7 @@
+complete -W 'start stop restart' svc
+complete -o filenames -o nospace -F _handler deploy
+gone: 1
+complete -W 'x y' a1
+complete -W 'x y' a2
+0
+status: 0

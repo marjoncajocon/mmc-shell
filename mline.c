@@ -22,6 +22,7 @@
 
 static Vec hist;
 static char *hist_file = NULL;
+static size_t hist_written = 0;	/* lines already in the file: for history -a */
 
 
 const Vec *line_hist (void) {
@@ -29,14 +30,52 @@ const Vec *line_hist (void) {
 }
 
 
-static void hist_push (const char *s) {
-  if (hist.n > 0 && strcmp(hist.v[hist.n - 1], s) == 0) return;
-  if (hist.n >= MMC_HISTORY_MAX) {
+/* $HISTSIZE lines are kept in memory, $HISTFILESIZE in the file */
+static size_t hist_limit (const char *name, size_t fallback) {
+  const char *v = var_get(name);
+  long long n;
+  if (v == NULL || *v == '\0') return fallback;
+  if (str_to_ll(v, &n) != 0) return fallback;
+  if (n < 0) return (size_t)-1;	/* negative: no limit, like bash */
+  return (size_t)n;
+}
+
+
+/* what $HISTCONTROL says; unset means ignoreboth, as mmc always did */
+enum { H_IGNSPACE = 1, H_IGNDUPS = 2, H_ERASEDUPS = 4 };
+
+static int hist_control (void) {
+  const char *v = var_get("HISTCONTROL");
+  int flags = 0;
+  if (v == NULL) return H_IGNSPACE | H_IGNDUPS;
+  while (*v != '\0') {
+    size_t n = strcspn(v, ":");
+    if (n == 11 && strncmp(v, "ignorespace", n) == 0) flags |= H_IGNSPACE;
+    else if (n == 10 && strncmp(v, "ignoredups", n) == 0) flags |= H_IGNDUPS;
+    else if (n == 10 && strncmp(v, "ignoreboth", n) == 0) flags |= H_IGNSPACE | H_IGNDUPS;
+    else if (n == 9 && strncmp(v, "erasedups", n) == 0) flags |= H_ERASEDUPS;
+    v += n;
+    if (*v == ':') v++;
+  }
+  return flags;
+}
+
+
+static void hist_trim (void) {
+  size_t max = hist_limit("HISTSIZE", MMC_HISTORY_MAX);
+  while (hist.n > max) {
     free(hist.v[0]);
     memmove(hist.v, hist.v + 1, hist.n * sizeof(char *));	/* with NULL */
     hist.n--;
+    if (hist_written > 0) hist_written--;
   }
+}
+
+
+static void hist_push (const char *s) {
+  if (hist.n > 0 && strcmp(hist.v[hist.n - 1], s) == 0) return;
   vec_push(&hist, xstrdup(s));
+  hist_trim();
 }
 
 
@@ -58,28 +97,50 @@ void line_hist_load (const char *native) {
     line = end + 1;
   }
   free(text);
-  if (lines > 2 * MMC_HISTORY_MAX) {	/* file grew too much: rewrite it */
-    int fd = os_open(hist_file, OS_WRITE);
-    size_t i;
-    if (fd < 0) return;
-    for (i = 0; i < hist.n; i++) fd_printf(fd, "%s\n", hist.v[i]);
-    os_close(fd);
+  hist_written = hist.n;
+  if (lines > 2 * hist_limit("HISTFILESIZE", MMC_HISTORY_MAX)) {	/* it grew too much: rewrite it */
+    line_hist_write(hist_file);
   }
 }
 
 
 void line_hist_add (const char *s) {
-  size_t before = hist.n;
+  int ctl = hist_control();
   const char *last = hist.n ? hist.v[hist.n - 1] : NULL;
-  if (s[0] == '\0' || s[0] == ' ' || (last && strcmp(last, s) == 0)) return;
+  size_t before = hist.n;
+  if (s[0] == '\0') return;
+  if ((ctl & H_IGNSPACE) && s[0] == ' ') return;
+  if ((ctl & H_IGNDUPS) && last != NULL && strcmp(last, s) == 0) return;
+  if (ctl & H_ERASEDUPS) {	/* keep only the newest of the same line */
+    size_t i = 0;
+    while (i < hist.n) {
+      if (strcmp(hist.v[i], s) == 0) line_hist_delete((int)i);
+      else i++;
+    }
+  }
   hist_push(s);
-  if (hist_file != NULL && (hist.n != before || before >= MMC_HISTORY_MAX)) {
+  if (hist.n == before && !(ctl & H_ERASEDUPS)) return;	/* nothing new */
+  if (hist_file != NULL) {
     int fd = os_open(hist_file, OS_APPEND);
     if (fd >= 0) {
       fd_printf(fd, "%s\n", s);
       os_close(fd);
+      hist_written = hist.n;
     }
   }
+}
+
+
+/* history -a: the lines added since the file was last written */
+void line_hist_append (const char *native) {
+  int fd;
+  size_t i;
+  if (hist_written >= hist.n) return;
+  fd = os_open(native, OS_APPEND);
+  if (fd < 0) return;
+  for (i = hist_written; i < hist.n; i++) fd_printf(fd, "%s\n", hist.v[i]);
+  os_close(fd);
+  hist_written = hist.n;
 }
 
 
@@ -97,11 +158,18 @@ void line_hist_write (const char *native) {
   if (fd < 0) return;
   for (i = 0; i < hist.n; i++) fd_printf(fd, "%s\n", hist.v[i]);
   os_close(fd);
+  if (hist_file != NULL && strcmp(native, hist_file) == 0) hist_written = hist.n;
+}
+
+
+const char *line_hist_file (void) {
+  return hist_file;
 }
 
 
 void line_hist_clear (void) {
   vec_free(&hist);
+  hist_written = 0;
   if (hist_file != NULL) {
     int fd = os_open(hist_file, OS_WRITE);
     if (fd >= 0) os_close(fd);
@@ -361,11 +429,51 @@ static void show_candidates (const Vec *v) {
 }
 
 
+/*
+** The words of the line up to the cursor, for COMP_WORDS: quotes are
+** kept as they were typed, blanks separate, an escaped blank does not.
+*/
+void line_words_at (const char *line, size_t upto, Vec *out, size_t *cword) {
+  size_t i = 0;
+  *cword = 0;
+  while (i < upto) {
+    Buf w;
+    int any = 0;
+    while (i < upto && (line[i] == ' ' || line[i] == '\t')) i++;
+    if (i >= upto) break;
+    buf_init(&w);
+    while (i < upto && line[i] != ' ' && line[i] != '\t') {
+      if (line[i] == '\\' && i + 1 < upto) {
+        buf_putc(&w, line[i + 1]);
+        i += 2;
+      }
+      else if (line[i] == '\'' || line[i] == '"') {
+        char q = line[i++];
+        while (i < upto && line[i] != q) buf_putc(&w, line[i++]);
+        if (i < upto) i++;
+      }
+      else buf_putc(&w, line[i++]);
+      any = 1;
+    }
+    vec_push(out, any && w.s ? buf_take(&w) : xstrdup(""));
+    if (any && !w.s) buf_free(&w);
+  }
+  /* the word the cursor is in (a blank before it means a new, empty one) */
+  if (upto > 0 && (line[upto - 1] == ' ' || line[upto - 1] == '\t')) {
+    vec_push(out, xstrdup(""));
+    *cword = out->n - 1;
+  }
+  else *cword = out->n > 0 ? out->n - 1 : 0;
+}
+
+
 static void ed_complete (Edit *e) {
   Vec cands;
   Buf word, esc;
   size_t ws = e->pos, i, keep;
   int command;
+  unsigned copts = 0;
+  int from_rule = 0;
   while (ws > 0 && (e->buf[ws - 1] != ' ' ||
                     (ws > 1 && e->buf[ws - 2] == '\\')))
     ws--;
@@ -380,10 +488,20 @@ static void ed_complete (Edit *e) {
   command = (i == 0 || strchr("|;&", e->buf[i - 1]) != NULL) &&
             word.s[0] != '\0' && strchr(word.s, '/') == NULL;
   vec_init(&cands);
-  if (command) complete_commands(word.s, &cands);
-  if (cands.n == 0) {
-    command = 0;
-    complete_files(word.s, &cands);
+  {	/* a rule from "complete" comes first: git, npm, docker ... */
+    Vec words;
+    size_t cword = 0;
+    vec_init(&words);
+    line_words_at(e->buf, e->pos, &words, &cword);
+    from_rule = comp_for_line(e->buf, e->pos, &words, cword, word.s, &cands, &copts);
+    vec_free(&words);
+  }
+  if (!from_rule) {
+    if (command) complete_commands(word.s, &cands);
+    if (cands.n == 0) {
+      command = 0;
+      complete_files(word.s, &cands);
+    }
   }
   if (cands.n == 0) {
     os_write(1, "\a", 1);
@@ -391,7 +509,20 @@ static void ed_complete (Edit *e) {
     vec_free(&cands);
     return;
   }
-  vec_sort(&cands);
+  if (from_rule && (copts & COMP_FILENAMES)) {	/* -o filenames: mark the folders */
+    for (i = 0; i < cands.n; i++) {
+      OsStat st;
+      char *old = cands.v[i];
+      char *native = path_to_native(old);
+      size_t len = strlen(old);
+      if (os_stat(native, &st) == 0 && st.is_dir && (len == 0 || old[len - 1] != '/')) {
+        cands.v[i] = xstrcat3(old, "/", "");
+        free(old);
+      }
+      free(native);
+    }
+  }
+  if (!(copts & COMP_NOSORT)) vec_sort(&cands);
   keep = common_prefix(&cands);
   if (cands.n > 1 && keep <= strlen(word.s)) {
     show_candidates(&cands);
@@ -402,10 +533,15 @@ static void ed_complete (Edit *e) {
   buf_init(&esc);
   for (i = 0; i < keep; i++) {
     char c = cands.v[0][i];
-    if (strchr(" \t\"'$;&|<>#*?[()", c) != NULL) buf_putc(&esc, '\\');
+    /* what a rule gave goes in as it is (git's own completion puts the
+    ** space there itself); only file names are protected */
+    int quote = !from_rule || (copts & COMP_FILENAMES) != 0;
+    if (quote && !(copts & COMP_NOQUOTE) && strchr(" \t\"'$;&|<>#*?[()", c) != NULL)
+      buf_putc(&esc, '\\');
     buf_putc(&esc, c);
   }
-  if (cands.n == 1 && (keep == 0 || cands.v[0][keep - 1] != '/'))
+  if (cands.n == 1 && !(copts & COMP_NOSPACE) &&
+      (keep == 0 || cands.v[0][keep - 1] != '/'))
     buf_putc(&esc, ' ');
   ed_delete(e, ws, e->pos);
   ed_insert(e, esc.s ? esc.s : "", esc.len);
@@ -512,6 +648,134 @@ static void read_paste (Edit *e) {
 }
 
 
+/*
+** {==================================================================
+** Ctrl-R: search backwards through the history while typing
+** ===================================================================
+*/
+
+/* the newest entry at or before 'from' that contains 'what' ((size_t)-1: none) */
+static size_t hist_find (const char *what, size_t from, int back) {
+  size_t i = from;
+  if (what[0] == '\0') return (hist.n > 0 && back) ? hist.n - 1 : (size_t)-1;
+  if (back) {
+    while (i != (size_t)-1) {
+      if (i < hist.n && strstr(hist.v[i], what) != NULL) return i;
+      i--;
+    }
+  }
+  else {
+    for (; i < hist.n; i++)
+      if (strstr(hist.v[i], what) != NULL) return i;
+  }
+  return (size_t)-1;
+}
+
+
+static void search_show (const char *what, const char *line, int back, int failed) {
+  Buf o;
+  int cols = os_term_cols();
+  size_t avail;
+  buf_init(&o);
+  buf_putc(&o, '\r');
+  if (failed) buf_puts(&o, "(failed ");
+  buf_puts(&o, back ? "(reverse-i-search)`" : "(i-search)`");
+  buf_puts(&o, what);
+  buf_puts(&o, "': ");
+  if (cols < 20) cols = 80;
+  avail = (size_t)cols - 1;
+  if (o.len < avail) {	/* the match, cut off at the right edge */
+    size_t room = avail - utf8_count(o.s, o.len), k = 0, shown = 0;
+    while (line[k] != '\0' && shown < room) {
+      if (((unsigned char)line[k] & 0xC0) != 0x80) shown++;
+      buf_putc(&o, line[k] == '\n' ? ' ' : line[k]);
+      k++;
+    }
+  }
+  buf_puts(&o, "\033[K");
+  os_write(1, o.s, o.len);
+  buf_free(&o);
+}
+
+
+/*
+** Runs the search. The line found is put into 'e'. Returns 0 when the
+** search was dropped (Ctrl-G, Ctrl-C) and the old line must come back,
+** 1 when a line was taken over, and 2 when Enter asked to run it too.
+** *key is an editing action still to do (an arrow key ends the search).
+*/
+static int ed_search (Edit *e, int *key) {
+  Buf what;
+  size_t found = (size_t)-1;
+  int back = 1, failed = 0, status = 1;
+  buf_init(&what);
+  *key = K_NONE;
+  search_show("", "", back, 0);	/* an empty search shows an empty line, like bash */
+  for (;;) {
+    int c = os_tty_getbyte();
+    size_t next;
+    if (c < 0) {
+      status = 0;
+      break;
+    }
+    if (c == 18 || c == 19) {	/* Ctrl-R, Ctrl-S: the next match */
+      back = (c == 18);
+      if (found == (size_t)-1) next = hist_find(what.s ? what.s : "", back ? (hist.n ? hist.n - 1 : (size_t)-1) : 0, back);
+      else if (back) next = (found == 0) ? (size_t)-1 : hist_find(what.s ? what.s : "", found - 1, back);
+      else next = hist_find(what.s ? what.s : "", found + 1, back);
+      if (next == (size_t)-1) failed = 1;
+      else {
+        found = next;
+        failed = 0;
+      }
+    }
+    else if (c == 127 || c == 8) {	/* Backspace: one character less */
+      if (what.len > 0) {
+        size_t k = what.len;
+        do k--; while (k > 0 && ((unsigned char)what.s[k] & 0xC0) == 0x80);
+        what.len = k;
+        what.s[k] = '\0';
+      }
+      found = hist_find(what.s ? what.s : "", hist.n ? hist.n - 1 : (size_t)-1, 1);
+      back = 1;
+      failed = (found == (size_t)-1 && what.len > 0);
+    }
+    else if (c == 7 || c == 3) {	/* Ctrl-G, Ctrl-C: forget it */
+      status = 0;
+      break;
+    }
+    else if (c == '\r' || c == '\n') {
+      status = 2;
+      break;
+    }
+    else if (c == 27) {	/* Esc, or an arrow key: keep the line, stop searching */
+      *key = read_escape();
+      break;
+    }
+    else if (c < 32 || c == 127) break;	/* any other key: keep the line */
+    else {	/* a character of the search word */
+      buf_putc(&what, (char)c);
+      next = hist_find(what.s, found == (size_t)-1 ? (hist.n ? hist.n - 1 : (size_t)-1) : found, back);
+      if (next == (size_t)-1) {	/* not here: look on from where we are */
+        next = hist_find(what.s, back ? (found == (size_t)-1 || found == 0 ? (size_t)-1 : found - 1) : found + 1, back);
+      }
+      if (next == (size_t)-1) failed = 1;
+      else {
+        found = next;
+        failed = 0;
+      }
+    }
+    search_show(what.s ? what.s : "", found == (size_t)-1 ? "" : hist.v[found], back, failed);
+  }
+  if (status != 0 && found != (size_t)-1) ed_set(e, hist.v[found]);
+  buf_free(&what);
+  os_write(1, "\r\033[K", 4);
+  return status;
+}
+
+/* }================================================================== */
+
+
 /* columns the prompt takes: color sequences (ESC [ ... m) take none */
 static size_t prompt_width (const char *p) {
   size_t n = 0;
@@ -565,6 +829,17 @@ char *line_read (const char *prompt) {
     else if (c == 16) key = K_UP;	/* Ctrl-P */
     else if (c == 14) key = K_DOWN;	/* Ctrl-N */
     else if (c == 23) key = K_WDEL;	/* Ctrl-W */
+    else if (c == 18) {	/* Ctrl-R: search the history */
+      char *old = xstrdup(e.buf);
+      int r = ed_search(&e, &key);
+      if (r == 0) ed_set(&e, old);
+      free(old);
+      hpos = hist.n;
+      if (r == 2) {
+        done = 1;
+        continue;
+      }
+    }
     else if (c == '\r' || c == '\n') {
       done = 1;
       continue;

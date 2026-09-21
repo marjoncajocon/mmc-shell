@@ -18,7 +18,7 @@ FONTS= HackNerdFontMono-Regular.ttf HackNerdFontMono-Bold.ttf \
 
 BASE= mutil.c mpath.c mos.c
 SRC= mmc.c mparse.c mexpand.c mpattern.c marith.c mregex.c mvar.c mexec.c \
-	mjobs.c mbuiltin.c mbvars.c mbio.c mbtest.c mline.c $(BASE)
+	mjobs.c mbuiltin.c mbvars.c mbio.c mbtest.c mline.c mcomp.c $(BASE)
 CORE= tgrid.c tvt.c ttheme.c tfont.c tdraw.c
 TSRC= mterm.c tapp.c tpty.c twin32.c tx11.c tcocoa.c $(CORE) $(BASE)
 

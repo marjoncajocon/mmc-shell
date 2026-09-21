@@ -474,6 +474,7 @@ void sh_procsubst_cleanup (void);
 void sh_error (const char *fmt, ...);	/* "mmc: line N: ..." */
 void sh_run_traps (void);
 void sh_exit_now (int status);	/* EXIT trap, history, bye */
+void sh_before_command (char **argv, int argc);
 int sh_errexit_check (int status);
 void sh_set_lineno (int line);
 void sh_init_fds (void);
@@ -541,6 +542,7 @@ void job_poll (int report);	/* collect finished ones */
 void job_list (int fd, int mode);	/* 0 jobs, 1 -l, 2 -p */
 void job_remove (Job *j);
 int job_count (void);
+void job_hup_all (void);	/* shopt -s huponexit */
 int job_status_of_pid (long pid, int *status);	/* for wait PID */
 
 /* }================================================================== */
@@ -616,6 +618,32 @@ int b_suspend (int argc, char **argv, int in, int out, int err);
 
 /*
 ** {==================================================================
+** mcomp.c - programmable completion (complete, compgen, compopt)
+** ===================================================================
+*/
+
+/* the -o options of a completion rule, for whoever shows the candidates */
+#define COMP_NOSPACE	0x01u
+#define COMP_FILENAMES	0x02u
+#define COMP_DIRNAMES	0x04u
+#define COMP_DEFAULT	0x08u
+#define COMP_BASHDEFAULT 0x10u
+#define COMP_PLUSDIRS	0x20u
+#define COMP_NOSORT	0x40u
+#define COMP_NOQUOTE	0x80u
+
+int comp_for_line (const char *line, size_t point, Vec *words, size_t cword,
+                   const char *word, Vec *out, unsigned *opts);
+void comp_actions (unsigned actions, const char *word, Vec *out);
+int b_complete (int argc, char **argv, int in, int out, int err);
+int b_compgen (int argc, char **argv, int in, int out, int err);
+int b_compopt (int argc, char **argv, int in, int out, int err);
+
+/* }================================================================== */
+
+
+/*
+** {==================================================================
 ** mline.c - line editor
 ** ===================================================================
 */
@@ -628,7 +656,11 @@ void line_hist_add (const char *s);
 void line_hist_clear (void);
 void line_hist_delete (int index);
 void line_hist_write (const char *native);
+void line_hist_append (const char *native);
+const char *line_hist_file (void);
 const Vec *line_hist (void);
+/* the words of a line and which one the cursor is in (for completion) */
+void line_words_at (const char *line, size_t upto, Vec *out, size_t *cword);
 
 /* }================================================================== */
 

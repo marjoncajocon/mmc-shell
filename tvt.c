@@ -184,7 +184,14 @@ static void set_mode (Vt *vt, int on) {
           break;
         case 1004: g->focus_events = on; break;
         case 2004: g->bracketed = on; break;
-        default: break;	/* mouse, 9001 (win32 input) ...: not supported */
+        /* the mouse: the program asks for clicks (1000), drags (1002),
+        ** every move (1003), and 1006 for reports it can read as text */
+        case 9: case 1000: case 1002: case 1003:
+          g->mouse = on ? p : 0;
+          break;
+        case 1005: case 1015: break;	/* other encodings: SGR is enough */
+        case 1006: g->mouse_sgr = on; break;
+        default: break;	/* 9001 (win32 input) ...: not supported */
       }
     }
     else if (vt->priv == 0 && p == 4) g->insert = on;
@@ -263,8 +270,14 @@ static void csi (Vt *vt, int final) {
 
 static void osc_end (Vt *vt) {
   const char *s = vt->osc.s ? vt->osc.s : "";
-  if ((s[0] == '0' || s[0] == '2') && s[1] == ';' && vt->title)
-    vt->title(vt->ud, s + 2);
+  const char *semi = strchr(s, ';');
+  int code = atoi(s);
+  if ((s[0] == '0' || s[0] == '1' || s[0] == '2') && s[1] == ';') {
+    if (s[0] != '1' && vt->title) vt->title(vt->ud, s + 2);	/* 1 is the icon name */
+  }
+  else if (semi != NULL && vt->on_osc != NULL &&
+           (code == 4 || code == 7 || code == 10 || code == 11 || code == 12 || code == 52))
+    vt->on_osc(vt->ud, code, semi + 1);
   buf_free(&vt->osc);
 }
 

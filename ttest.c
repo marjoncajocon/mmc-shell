@@ -257,6 +257,57 @@ static int replay (const char *file) {
 }
 
 
+/* the mouse modes and the OSC sequences programs use to ask things */
+static char osc_seen[256];
+
+static void on_osc (void *ud, int code, const char *text) {
+  (void)ud;
+  sprintf(osc_seen, "%d|%.200s", code, text);
+}
+
+
+static void test_modes (void) {
+  T t;
+  t_open(&t, 20, 5, 10);
+  t.vt.on_osc = on_osc;
+
+  feed(&t, "\033[?1000h");
+  check_int("mouse 1000 on", t.g->mouse, 1000);
+  feed(&t, "\033[?1006h");
+  check_int("mouse SGR on", t.g->mouse_sgr, 1);
+  feed(&t, "\033[?1002h");
+  check_int("mouse 1002 replaces 1000", t.g->mouse, 1002);
+  feed(&t, "\033[?1002l");
+  check_int("mouse off", t.g->mouse, 0);
+  feed(&t, "\033[?1003h\033c");	/* RIS clears it again */
+  check_int("reset clears the mouse mode", t.g->mouse, 0);
+  check_int("reset clears SGR", t.g->mouse_sgr, 0);
+
+  feed(&t, "\033]0;a title\007");
+  check_str("OSC 0 sets the title", last_title, "a title");
+  strcpy(last_title, "kept");
+  feed(&t, "\033]1;icon\007");
+  check_str("OSC 1 leaves the title alone", last_title, "kept");
+
+  osc_seen[0] = '\0';
+  feed(&t, "\033]11;?\033\\");
+  check_str("OSC 11 asks for the background", osc_seen, "11|?");
+  osc_seen[0] = '\0';
+  feed(&t, "\033]52;c;bW1j\007");
+  check_str("OSC 52 carries the clipboard", osc_seen, "52|c;bW1j");
+  osc_seen[0] = '\0';
+  feed(&t, "\033]7;file://pc/d/w/mmc\033\\");
+  check_str("OSC 7 carries the folder", osc_seen, "7|file://pc/d/w/mmc");
+  osc_seen[0] = '\0';
+  feed(&t, "\033]4;12;?\007");
+  check_str("OSC 4 asks for a palette color", osc_seen, "4|12;?");
+  osc_seen[0] = '\0';
+  feed(&t, "\033]99;whatever\007");
+  check_str("an unknown OSC is ignored", osc_seen, "");
+  t_close(&t);
+}
+
+
 /* every palette color must be readable on the theme background */
 static void test_contrast (void) {
   static const char *const names[] = {"dark", "light"};
@@ -439,6 +490,7 @@ int main (int argc, char **argv) {
   if (argc >= 3 && strcmp(argv[1], "render") == 0)
     return render(argv[2], argc > 3 ? argv[3] : "dark", argc > 4 ? argv[4] : NULL);
   test_core();
+  test_modes();
   test_contrast();
   test_powerline();
   printf("%d checks, %d failed\n", checks, failures);

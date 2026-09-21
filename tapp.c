@@ -8,6 +8,7 @@
 
 #include "mterm.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +45,9 @@ static struct {
   unsigned click_at;
   int clicks, click_x, click_y;
   int mouse_x, mouse_y;
+  char cwd[512];	/* what the shell reported with OSC 7 */
+  int mouse_held;	/* the button a program is being told about (0: none) */
+  int mouse_cx, mouse_cy;	/* the cell the last report named */
   int done, exit_code;
 } A;
 
@@ -262,9 +266,21 @@ static void new_window (void) {
   static const int fds[3] = {0, 1, 2};
   OsProc proc;
   long pid;
+  char *back = NULL;
   argv[0] = A.exe;
   argv[1] = NULL;
+  if (A.cwd[0] != '\0') {	/* where the shell said it is (OSC 7) */
+    back = os_getcwd();
+    if (os_chdir(A.cwd) != 0) {
+      free(back);
+      back = NULL;
+    }
+  }
   if (os_spawn(A.exe, argv, NULL, fds, 3, &proc, &pid) == 0) os_detach(proc);
+  if (back != NULL) {
+    os_chdir(back);
+    free(back);
+  }
 }
 
 
@@ -564,6 +580,84 @@ static int is_word_char (const Line *l, int x) {
 }
 
 
+/*
+** {==================================================================
+** Telling a program about the mouse (vim, htop, lazygit ...)
+** ===================================================================
+*/
+
+/* the program asked for mouse reports, and Shift is not held */
+static int mouse_to_program (int mods) {
+  return A.g->mouse != 0 && !(mods & TM_SHIFT) && A.g->view == 0 && !A.menu.open;
+}
+
+
+static int mouse_mods (int mods) {
+  return ((mods & TM_SHIFT) ? 4 : 0) | ((mods & TM_ALT) ? 8 : 0) |
+         ((mods & TM_CTRL) ? 16 : 0);
+}
+
+
+/* one report: SGR (1006) when the program asked for it, else the old bytes */
+static void mouse_report (int code, int cx, int cy, int release) {
+  char buf[64];
+  if (cx < 0) cx = 0;
+  if (cy < 0) cy = 0;
+  if (cx >= A.g->cols) cx = A.g->cols - 1;
+  if (cy >= A.g->rows) cy = A.g->rows - 1;
+  if (A.g->mouse_sgr) {
+    sprintf(buf, "\033[<%d;%d;%d%c", code, cx + 1, cy + 1, release ? 'm' : 'M');
+    send_str(buf);
+    return;
+  }
+  if (release) code = 3 | (code & ~3);	/* the old way cannot say which button */
+  if (cx > 222 || cy > 222) return;	/* further right it cannot count */
+  sprintf(buf, "\033[M%c%c%c", (char)(32 + code), (char)(33 + cx), (char)(33 + cy));
+  send(buf, 6);
+}
+
+
+/* returns 1 when the event went to the program and the window is done with it */
+static int mouse_send (int type, int button, int x, int y, int mods, int arg) {
+  int cx, cy, code;
+  cell_at(x, y, &cx, &cy);
+  if (type == TMS_WHEEL) {
+    int n = arg > 0 ? arg : -arg;
+    code = (arg > 0 ? 64 : 65) | mouse_mods(mods);
+    for (; n > 0; n--) mouse_report(code, cx, cy, 0);
+    return 1;
+  }
+  if (type == TMS_DOWN) {
+    if (button < 1 || button > 3) return 0;
+    A.mouse_held = button;
+    A.mouse_cx = cx;
+    A.mouse_cy = cy;
+    mouse_report((button - 1) | mouse_mods(mods), cx, cy, 0);
+    return 1;
+  }
+  if (type == TMS_UP) {
+    int held = A.mouse_held;
+    A.mouse_held = 0;
+    if (A.g->mouse == 9) return 1;	/* X10: presses only */
+    if (held < 1 || held > 3) return 1;
+    mouse_report((held - 1) | mouse_mods(mods), cx, cy, 1);
+    return 1;
+  }
+  if (type == TMS_MOVE) {
+    if (A.g->mouse != 1003 && !(A.g->mouse == 1002 && A.mouse_held)) return 1;
+    if (cx == A.mouse_cx && cy == A.mouse_cy) return 1;	/* still the same cell */
+    A.mouse_cx = cx;
+    A.mouse_cy = cy;
+    code = (A.mouse_held ? A.mouse_held - 1 : 3) | 32 | mouse_mods(mods);
+    mouse_report(code, cx, cy, 0);
+    return 1;
+  }
+  return 0;
+}
+
+/* }================================================================== */
+
+
 /* grows the selection to whole words or whole lines */
 static void sel_extend (void) {
   int swap = (A.by < A.ay) || (A.by == A.ay && A.bx < A.ax);
@@ -601,6 +695,7 @@ void app_on_mouse (int type, int button, int x, int y, int mods, int arg) {
   if (type == TMS_WHEEL) {
     if ((mods & TM_CTRL) && (mods & TM_SHIFT)) change_opacity(arg > 0 ? 5 : -5);
     else if (mods & TM_CTRL) zoom(arg > 0 ? 1 : -1);
+    else if (mouse_to_program(mods)) mouse_send(type, button, x, y, mods, arg);
     else if (A.g->alt) {	/* full screen programs get arrow keys */
       int n = arg > 0 ? arg : -arg;
       for (; n > 0; n--) send_csi(0, 0, arg > 0 ? 'A' : 'B');
@@ -635,6 +730,7 @@ void app_on_mouse (int type, int button, int x, int y, int mods, int arg) {
     }
     return;
   }
+  if (mouse_to_program(mods) && mouse_send(type, button, x, y, mods, arg)) return;
   cell_at(x, y, &cx, &cy);
   if (type == TMS_DOWN && button == 1) {
     int bx, by, bw, bh;
@@ -719,6 +815,165 @@ static void on_bell (void *ud) {
   (void)ud;
   win_flash();
 }
+
+
+/*
+** {==================================================================
+** OSC: colors a program asks about, the clipboard, the folder
+** ===================================================================
+*/
+
+/* "#rrggbb", "rgb:rr/gg/bb" and "rgb:rrrr/gggg/bbbb" */
+static int osc_color (const char *v, uint32_t *out) {
+  unsigned r, g, b;
+  if (v[0] == '#' && strlen(v + 1) == 6) {
+    *out = (uint32_t)strtoul(v + 1, NULL, 16);
+    return 1;
+  }
+  if (strncmp(v, "rgb:", 4) == 0) {
+    char *end;
+    const char *p = v + 4;
+    size_t digits;
+    r = (unsigned)strtoul(p, &end, 16);
+    digits = (size_t)(end - p);
+    if (*end != '/') return 0;
+    p = end + 1;
+    g = (unsigned)strtoul(p, &end, 16);
+    if (*end != '/') return 0;
+    b = (unsigned)strtoul(end + 1, &end, 16);
+    if (digits == 4) {	/* 16 bit per channel: take the top byte */
+      r >>= 8;
+      g >>= 8;
+      b >>= 8;
+    }
+    *out = ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+    return 1;
+  }
+  return 0;
+}
+
+
+static void osc_reply_color (int code, int index, uint32_t rgb) {
+  char buf[96];
+  unsigned r = (rgb >> 16) & 0xFF, g = (rgb >> 8) & 0xFF, b = rgb & 0xFF;
+  if (code == 4)
+    sprintf(buf, "\033]4;%d;rgb:%02x%02x/%02x%02x/%02x%02x\033\\", index, r, r, g, g, b, b);
+  else
+    sprintf(buf, "\033]%d;rgb:%02x%02x/%02x%02x/%02x%02x\033\\", code, r, r, g, g, b, b);
+  pty_write(buf, strlen(buf));
+}
+
+
+static size_t osc_unbase64 (const char *s, char *out, size_t max) {
+  static const char *const abc =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  unsigned long acc = 0;
+  int bits = 0;
+  size_t n = 0;
+  for (; *s != '\0'; s++) {
+    const char *at;
+    if (*s == '=' || *s == '\r' || *s == '\n') continue;
+    at = strchr(abc, *s);
+    if (at == NULL) return 0;	/* not base64: drop the whole thing */
+    acc = (acc << 6) | (unsigned long)(at - abc);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      if (n + 1 >= max) return n;
+      out[n++] = (char)((acc >> bits) & 0xFF);
+    }
+  }
+  out[n] = '\0';
+  return n;
+}
+
+
+/* "file://host/d/w/mmc" or a plain path -> the folder a new window opens in */
+static void osc_set_cwd (const char *text) {
+  const char *p = text;
+  char *w;
+  if (strncmp(p, "file://", 7) == 0) {
+    p += 7;
+    p = strchr(p, '/');	/* past the host name */
+    if (p == NULL) return;
+  }
+  strncpy(A.cwd, p, sizeof(A.cwd) - 1);
+  A.cwd[sizeof(A.cwd) - 1] = '\0';
+  for (w = A.cwd; *w != '\0'; w++) {	/* %20 and friends */
+    if (w[0] == '%' && isxdigit((unsigned char)w[1]) && isxdigit((unsigned char)w[2])) {
+      char hex[3];
+      hex[0] = w[1];
+      hex[1] = w[2];
+      hex[2] = '\0';
+      *w = (char)strtol(hex, NULL, 16);
+      memmove(w + 1, w + 3, strlen(w + 3) + 1);
+    }
+  }
+#ifdef _WIN32
+  if (A.cwd[0] == '/' && isalpha((unsigned char)A.cwd[1]) && A.cwd[2] == '/') {
+    char drive[4];	/* /d/w/mmc -> D:\w\mmc */
+    drive[0] = (char)toupper((unsigned char)A.cwd[1]);
+    drive[1] = ':';
+    drive[2] = '\0';
+    memmove(A.cwd + 2, A.cwd + 3, strlen(A.cwd + 3) + 1);
+    A.cwd[0] = drive[0];
+    A.cwd[1] = ':';
+  }
+  for (w = A.cwd; *w != '\0'; w++)
+    if (*w == '/') *w = '\\';
+#endif
+}
+
+
+static void on_osc (void *ud, int code, const char *text) {
+  uint32_t rgb;
+  (void)ud;
+  if (code == 7) {
+    osc_set_cwd(text);
+    return;
+  }
+  if (code == 52) {	/* the program puts something in the clipboard */
+    const char *data = strchr(text, ';');
+    char *plain;
+    size_t n;
+    if (data == NULL) return;
+    data++;
+    if (data[0] == '?') return;	/* reading it back is not allowed */
+    plain = (char *)xmalloc(strlen(data) + 4);
+    n = osc_unbase64(data, plain, strlen(data) + 3);
+    if (n > 0) win_set_clipboard(plain);
+    free(plain);
+    return;
+  }
+  if (code == 4) {	/* one color of the palette */
+    const char *semi = strchr(text, ';');
+    int idx = atoi(text);
+    if (semi == NULL || idx < 0 || idx > 255) return;
+    if (semi[1] == '?') {
+      osc_reply_color(4, idx, theme_color(&A.theme, COL_IDX(idx), 1));
+      return;
+    }
+    if (idx < 16 && osc_color(semi + 1, &rgb)) {
+      A.theme.pal[idx] = rgb;
+      A.g->all_dirty = 1;
+      touch();
+    }
+    return;
+  }
+  if (text[0] == '?') {	/* 10, 11, 12: what are your colors? */
+    osc_reply_color(code, 0, code == 10 ? A.theme.fg :
+                             code == 11 ? A.theme.bg : A.theme.cursor);
+    return;
+  }
+  if (!osc_color(text, &rgb)) return;
+  if (code == 10) A.theme.fg = rgb;
+  else if (code == 11) A.theme.bg = rgb;
+  else A.theme.cursor = rgb;
+  A.g->all_dirty = 1;
+  touch();
+}
+
+/* }================================================================== */
 
 
 static void finish (void) {
@@ -895,6 +1150,7 @@ int app_init (const AppArgs *args, const char *argv0) {
   A.vt.reply = on_reply;
   A.vt.title = on_title;
   A.vt.bell = on_bell;
+  A.vt.on_osc = on_osc;
   A.focused = A.blink_on = 1;
   return 0;
 }

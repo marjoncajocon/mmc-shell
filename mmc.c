@@ -419,7 +419,9 @@ static void show_prompt_header (void) {
     buf_puts(&b, shown + hn);
   }
   else buf_puts(&b, shown);
-  fd_printf(1, "\033]0;MMC:%s\007\n", b.s);
+  fd_printf(1, "\033]0;MMC:%s\007", b.s);
+  /* OSC 7: the window learns where we are, so a new one opens here too */
+  fd_printf(1, "\033]7;file://%s%s\033\\\n", host ? host : "", shown);
   if (strcmp(st, "ps1") == 0) {
     /* all of it is in PS1 */
   }
@@ -570,6 +572,326 @@ static void show_banner (void) {
 ** ===================================================================
 */
 
+/*
+** History expansion (set -H, on in an interactive shell):
+** !! !n !-n !word !?word? and the words !^ !$ !* !!:n !!:n-m,
+** the parts :h :t :r :e, :p, :s/old/new/ (:gs) and ^old^new.
+*/
+
+/* the words of a history line; quotes keep their blanks together */
+static void hist_words (const char *s, Vec *out) {
+  while (*s != '\0') {
+    Buf w;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '\0') break;
+    buf_init(&w);
+    while (*s != '\0' && *s != ' ' && *s != '\t') {
+      if (*s == '\'' || *s == '"') {
+        char q = *s++;
+        buf_putc(&w, q);
+        while (*s != '\0' && *s != q) buf_putc(&w, *s++);
+        if (*s != '\0') buf_putc(&w, *s++);
+      }
+      else buf_putc(&w, *s++);
+    }
+    vec_push(out, w.s ? buf_take(&w) : xstrdup(""));
+  }
+}
+
+
+/* the newest history line that starts with (or, whole != 0, contains) 'what' */
+static const char *hist_search (const char *what, int whole) {
+  const Vec *h = line_hist();
+  size_t i;
+  for (i = h->n; i > 0; i--) {
+    const char *s = h->v[i - 1];
+    if (whole ? (strstr(s, what) != NULL) : (strncmp(s, what, strlen(what)) == 0))
+      return s;
+  }
+  return NULL;
+}
+
+
+/* old -> new in s: once, or everywhere when 'all' */
+static char *hist_sub (const char *s, const char *old, const char *new_, int all) {
+  Buf b;
+  size_t n = strlen(old);
+  const char *p = s;
+  buf_init(&b);
+  if (n == 0) return xstrdup(s);
+  while (*p != '\0') {
+    if (strncmp(p, old, n) == 0) {
+      buf_puts(&b, new_);
+      p += n;
+      if (!all) break;
+    }
+    else buf_putc(&b, *p++);
+  }
+  buf_puts(&b, p);
+  return b.s ? buf_take(&b) : xstrdup("");
+}
+
+
+/* :h :t :r :e and :s/:gs, in place */
+static void hist_modify (char **text, const char **pp, char **last_old, char **last_new) {
+  const char *p = *pp;
+  while (*p == ':') {
+    char c = p[1];
+    char *s = *text;
+    int all = 0;
+    if (c == 'g' && (p[2] == 's' || p[2] == '&')) {
+      all = 1;
+      p++;
+      c = p[1];
+    }
+    if (c == 'h') {	/* the directory */
+      char *slash = strrchr(s, '/');
+      *text = slash ? xstrndup(s, (size_t)(slash - s)) : xstrdup(".");
+      free(s);
+      p += 2;
+    }
+    else if (c == 't') {	/* the file name */
+      char *slash = strrchr(s, '/');
+      *text = xstrdup(slash ? slash + 1 : s);
+      free(s);
+      p += 2;
+    }
+    else if (c == 'r') {	/* without the extension */
+      char *dot = strrchr(s, '.');
+      *text = dot ? xstrndup(s, (size_t)(dot - s)) : xstrdup(s);
+      free(s);
+      p += 2;
+    }
+    else if (c == 'e') {	/* only the extension */
+      char *dot = strrchr(s, '.');
+      *text = xstrdup(dot ? dot : "");
+      free(s);
+      p += 2;
+    }
+    else if (c == 's' || c == '&') {
+      char *old = NULL, *new_ = NULL;
+      if (c == '&') {	/* :& repeats the last substitution */
+        old = *last_old ? xstrdup(*last_old) : NULL;
+        new_ = *last_new ? xstrdup(*last_new) : xstrdup("");
+        p += 2;
+      }
+      else {
+        char sep = p[2];
+        const char *q;
+        if (sep == '\0') break;
+        q = p + 3;
+        {
+          const char *e1 = strchr(q, sep);
+          if (e1 == NULL) {
+            old = xstrdup(q);
+            new_ = xstrdup("");
+            p = q + strlen(q);
+          }
+          else {
+            const char *e2 = strchr(e1 + 1, sep);
+            old = xstrndup(q, (size_t)(e1 - q));
+            new_ = e2 ? xstrndup(e1 + 1, (size_t)(e2 - e1 - 1)) : xstrdup(e1 + 1);
+            p = e2 ? e2 + 1 : e1 + 1 + strlen(e1 + 1);
+          }
+        }
+        free(*last_old);
+        free(*last_new);
+        *last_old = xstrdup(old);
+        *last_new = xstrdup(new_);
+      }
+      if (old != NULL) {
+        *text = hist_sub(s, old, new_, all);
+        free(s);
+      }
+      free(old);
+      free(new_);
+    }
+    else break;
+  }
+  *pp = p;
+}
+
+
+/* one !... at *pp; NULL and *err when there is no such line */
+static char *hist_one (const char **pp, int *err, int *print_only,
+                       char **last_old, char **last_new) {
+  const Vec *h = line_hist();
+  const char *p = *pp + 1;	/* after the ! */
+  const char *line = NULL;
+  char *text;
+  Vec words;
+  size_t from = 0, to = 0;
+  int have_words = 0;
+  if (*p == '!') {
+    line = h->n ? h->v[h->n - 1] : NULL;
+    p++;
+  }
+  else if (*p == '?') {
+    const char *e = strchr(p + 1, '?');
+    char *what = e ? xstrndup(p + 1, (size_t)(e - p - 1)) : xstrdup(p + 1);
+    line = hist_search(what, 1);
+    free(what);
+    p = e ? e + 1 : p + 1 + strlen(p + 1);
+  }
+  else if (*p == '-' || isdigit((unsigned char)*p)) {
+    int neg = (*p == '-');
+    long n;
+    if (neg) p++;
+    n = strtol(p, (char **)&p, 10);
+    if (neg) line = ((size_t)n <= h->n && n > 0) ? h->v[h->n - (size_t)n] : NULL;
+    else line = (n > 0 && (size_t)n <= h->n) ? h->v[n - 1] : NULL;
+  }
+  else if (*p == '$' || *p == '^' || *p == '*' || *p == ':') {
+    line = h->n ? h->v[h->n - 1] : NULL;	/* !$ is short for !!:$ */
+  }
+  else {	/* !word: the newest line that starts with it */
+    size_t n = strcspn(p, " \t\n:;&|<>()'\"$");
+    char *what;
+    if (n == 0) {
+      *err = 0;	/* a lonely ! is just a ! */
+      return NULL;
+    }
+    what = xstrndup(p, n);
+    line = hist_search(what, 0);
+    free(what);
+    p += n;
+  }
+  if (line == NULL) {
+    *err = 1;
+    return NULL;
+  }
+  vec_init(&words);
+  if (*p == ':' && (isdigit((unsigned char)p[1]) || p[1] == '^' || p[1] == '$' || p[1] == '*' || p[1] == '-')) p++;
+  if (*p == '^' || *p == '$' || *p == '*' || isdigit((unsigned char)*p)) {
+    hist_words(line, &words);
+    have_words = 1;
+    if (words.n == 0) from = to = 0;
+    else if (*p == '^') {
+      from = to = (words.n > 1) ? 1 : 0;
+      p++;
+    }
+    else if (*p == '$') {
+      from = to = words.n - 1;
+      p++;
+    }
+    else if (*p == '*') {
+      from = (words.n > 1) ? 1 : 0;
+      to = words.n - 1;
+      p++;
+    }
+    else {
+      from = to = (size_t)strtol(p, (char **)&p, 10);
+      if (*p == '-') {
+        p++;
+        if (*p == '$') {
+          to = words.n ? words.n - 1 : 0;
+          p++;
+        }
+        else if (isdigit((unsigned char)*p)) to = (size_t)strtol(p, (char **)&p, 10);
+        else to = words.n ? words.n - 1 : 0;
+      }
+      else if (*p == '*') {
+        to = words.n ? words.n - 1 : 0;
+        p++;
+      }
+    }
+  }
+  if (have_words) {
+    Buf b;
+    size_t i;
+    buf_init(&b);
+    for (i = from; i <= to && i < words.n; i++) {
+      if (i > from) buf_putc(&b, ' ');
+      buf_puts(&b, words.v[i]);
+    }
+    text = b.s ? buf_take(&b) : xstrdup("");
+  }
+  else text = xstrdup(line);
+  vec_free(&words);
+  if (*p == ':' && p[1] == 'p') {
+    *print_only = 1;
+    p += 2;
+  }
+  hist_modify(&text, &p, last_old, last_new);
+  *pp = p;
+  return text;
+}
+
+
+/*
+** Expands the ! references of an input line. Returns 1 when the line
+** changed, 0 when there was nothing to do, and -1 when a reference
+** points at a line that is not in the history (the line is not run).
+*/
+static int hist_expand (const char *line, char **out) {
+  Buf b;
+  const char *p = line;
+  int changed = 0, sq = 0, print_only = 0;
+  static char *last_old = NULL, *last_new = NULL;
+  const Vec *h = line_hist();
+  *out = NULL;
+  if (line[0] == '^' && h->n > 0) {	/* ^old^new^: correct the last line */
+    const char *e1 = strchr(line + 1, '^');
+    char *old, *new_, *text;
+    if (e1 == NULL) return 0;
+    old = xstrndup(line + 1, (size_t)(e1 - line - 1));
+    {
+      const char *e2 = strchr(e1 + 1, '^');
+      new_ = e2 ? xstrndup(e1 + 1, (size_t)(e2 - e1 - 1)) : xstrdup(e1 + 1);
+    }
+    text = hist_sub(h->v[h->n - 1], old, new_, 0);
+    free(old);
+    free(new_);
+    *out = text;
+    return 1;
+  }
+  buf_init(&b);
+  while (*p != '\0') {
+    if (*p == '\\' && p[1] == '!') {	/* \! is a plain ! */
+      buf_putc(&b, '!');
+      p += 2;
+      changed = 1;
+      continue;
+    }
+    if (*p == '\'' && !sq) sq = 1;
+    else if (*p == '\'' && sq) sq = 0;
+    if (*p == '!' && !sq && p[1] != '\0' && p[1] != ' ' && p[1] != '\t' &&
+        p[1] != '=' && p[1] != '(' && p[1] != '\n') {
+      int err = 0;
+      const char *q = p;
+      char *text = hist_one(&q, &err, &print_only, &last_old, &last_new);
+      if (text != NULL) {
+        buf_puts(&b, text);
+        free(text);
+        p = q;
+        changed = 1;
+        continue;
+      }
+      if (err) {
+        char *what = xstrndup(p, strcspn(p, " \t\n;|&"));
+        sh_error("%s: event not found", what);
+        free(what);
+        buf_free(&b);
+        return -1;
+      }
+    }
+    buf_putc(&b, *p++);
+  }
+  if (!changed) {
+    buf_free(&b);
+    return 0;
+  }
+  *out = b.s ? buf_take(&b) : xstrdup("");
+  if (print_only) {	/* :p only shows the line */
+    fd_printf(1, "%s\n", *out);
+    line_hist_add(*out);
+    free(*out);
+    *out = xstrdup("");
+  }
+  return 1;
+}
+
+
 /* a multi-line command as one history line: "if x; then y; fi" */
 static char *history_line (const char *cmd) {
   Buf b;
@@ -601,18 +923,43 @@ static char *history_line (const char *cmd) {
 }
 
 
+/* $PROMPT_COMMAND, before every prompt: a string, or an array of them */
+static void run_prompt_command (void) {
+  size_t n = var_count("PROMPT_COMMAND"), i;
+  int saved = sh_status;
+  if (n == 0) {
+    const char *one = var_get("PROMPT_COMMAND");
+    if (one != NULL && one[0] != '\0') sh_run_string(one, "PROMPT_COMMAND", sh_lineno);
+  }
+  else {
+    for (i = 0; i < n; i++) {
+      const char *one = var_aget("PROMPT_COMMAND", i);
+      if (one != NULL && one[0] != '\0') sh_run_string(one, "PROMPT_COMMAND", sh_lineno);
+    }
+  }
+  sh_status = saved;	/* $? keeps the status of the command, not of the hook */
+}
+
+
 static void repl (void) {
-  int line0 = 1;
+  int line0 = 1, warned_jobs = 0;
   if (sh_interactive) {
-    char *hf = path_join(g_home, ".mmc_history");
+    const char *set = var_get("HISTFILE");	/* the profile may point elsewhere */
+    char *hf = set && *set ? path_to_native(set) : path_join(g_home, ".mmc_history");
     line_hist_load(hf);
+    if (set == NULL || *set == '\0') {
+      char *shown = path_to_display(hf);
+      var_set("HISTFILE", shown);
+      free(shown);
+    }
     free(hf);
+    opt_set("histexpand", 1);	/* !! and friends, like an interactive bash */
     show_banner();
   }
   while (!sh_exit) {
     Buf cmd;
     char *line;
-    int first = 1, r;
+    int first = 1, r, bad = 0;
     buf_init(&cmd);
     for (;;) {
       char *prompt;
@@ -620,7 +967,10 @@ static void repl (void) {
         job_poll(1);
         os_tty_fix();
         os_interrupted = 0;
-        if (first) show_prompt_header();
+        if (first) {
+          run_prompt_command();
+          show_prompt_header();
+        }
         prompt = first ? prompt_last_line() : expand_prompt(var_get("PS2") ? var_get("PS2") : "> ");
       }
       else prompt = xstrdup("");
@@ -629,6 +979,21 @@ static void repl (void) {
       if (line == NULL) break;
       if (first && strncmp(line, "\xEF\xBB\xBF", 3) == 0)	/* UTF-8 BOM from a pipe */
         memmove(line, line + 3, strlen(line + 3) + 1);
+      if (sh_interactive && opt_get("histexpand") &&
+          (strchr(line, '!') != NULL || (first && line[0] == '^'))) {
+        char *ex = NULL;
+        int e = hist_expand(line, &ex);
+        if (e < 0) {	/* !nothing: the line is dropped, like bash */
+          free(line);
+          bad = 1;
+          break;
+        }
+        if (e > 0) {
+          free(line);
+          line = ex;
+          fd_printf(1, "%s\n", line);	/* show what it became */
+        }
+      }
       if (!first) buf_putc(&cmd, '\n');
       buf_puts(&cmd, line);
       free(line);
@@ -639,6 +1004,11 @@ static void repl (void) {
       }
       r = parse_is_complete(cmd.s ? cmd.s : "");
       if (r != P_INCOMPLETE) break;
+    }
+    if (bad) {	/* a ! that pointed nowhere: forget the whole command */
+      sh_status = 1;
+      buf_free(&cmd);
+      continue;
     }
     if (first && line == NULL) {	/* end of input */
       if (sh_interactive) fd_puts(1, "exit\n");
@@ -666,7 +1036,14 @@ static void repl (void) {
     if (line == NULL) break;
     if (sh_interactive) {
       os_interrupted = 0;
-      if (sh_exit && job_count() > 0) {	/* like bash: say it once */
+      if (sh_exit && job_count() > 0) {
+        if (opt_get("checkjobs") && !warned_jobs) {	/* like bash: ask once */
+          fd_puts(2, "mmc: there are running jobs.\n");
+          job_list(2, 0);
+          warned_jobs = 1;
+          sh_exit = 0;
+        }
+        else if (opt_get("huponexit")) job_hup_all();
       }
     }
   }
@@ -836,6 +1213,7 @@ static int usage (int fd) {
     "  -e -u -x -o opt  set options, as with 'set' (-o pipefail ...)\n"
     "  -n               read the commands, run nothing (syntax check)\n"
     "  --check file...  check scripts: syntax, and commands that do not exist\n"
+    "  --complete LINE  what Tab would offer for that command line\n"
     "  --norc           do not read ~/.mmcrc\n"
     "  --noprofile      do not read /etc/profile\n"
     "  --root DIR       use DIR as the MMC folder instead of the program's\n"
@@ -851,6 +1229,7 @@ int main (int argc, char **argv) {
   long stage_pid = 0;
   char *cwd, *exedir;
   int i, top_level, norc = 0, noprofile = 0, from_stdin = 0, check = 0, force_i = 0;
+  const char *complete_line = NULL;
   int have_script = 0;
   Vec setopts;	/* -e -x -o pipefail ... applied after setup */
   os_args(&argc, &argv);
@@ -874,6 +1253,7 @@ int main (int argc, char **argv) {
       i++;
       break;
     }
+    else if (strcmp(a, "--complete") == 0 && i + 1 < argc) complete_line = argv[++i];
     else if (strcmp(a, "--norc") == 0) norc = 1;
     else if (strcmp(a, "--noprofile") == 0) noprofile = 1;
     else if (strcmp(a, "--login") == 0 || strcmp(a, "-l") == 0) sh_login = 1;
@@ -960,7 +1340,10 @@ int main (int argc, char **argv) {
       if (check_file(argv[i]) != 0) status = 1;
     return status;
   }
-  sh_interactive = force_i || (command == NULL && !have_script && os_is_tty(0) && !from_stdin);
+  /* --complete reads the config like an interactive shell: that is where
+  ** the completion rules are set up */
+  sh_interactive = force_i || complete_line != NULL ||
+                   (command == NULL && !have_script && os_is_tty(0) && !from_stdin);
   if (sh_interactive) opt_set("monitor", 1);
   opt_set("expand_aliases", sh_interactive);	/* bash: scripts do not expand aliases */
   if (sh_login) opt_set("login_shell", 1);
@@ -974,6 +1357,24 @@ int main (int argc, char **argv) {
       else opt_letter(o[1], o[0] == '-');
     }
     vec_free(&setopts);
+  }
+  if (complete_line != NULL) {	/* --complete 'git che': what Tab would offer */
+    Vec words, cands;
+    size_t cword = 0, k;
+    unsigned opts = 0;
+    const char *word;
+    vec_init(&words);
+    vec_init(&cands);
+    line_words_at(complete_line, strlen(complete_line), &words, &cword);
+    word = (cword < words.n) ? words.v[cword] : "";
+    if (!comp_for_line(complete_line, strlen(complete_line), &words, cword, word,
+                       &cands, &opts))
+      fd_puts(2, "mmc: --complete: no completion rule for this command\n");
+    vec_sort(&cands);
+    for (k = 0; k < cands.n; k++) fd_printf(1, "%s\n", cands.v[k]);
+    vec_free(&words);
+    vec_free(&cands);
+    return 0;
   }
   if (command != NULL) {
     sh_run_string(command, MMC_NAME, 1);

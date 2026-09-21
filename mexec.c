@@ -736,17 +736,28 @@ void func_names (Vec *out) {
 }
 
 
+/* the line each call was made on; grows and shrinks with funcname_stack */
+static Vec callline_stack;
+
+
 /* FUNCNAME follows the call stack; [0] is the running function */
 static void update_funcname (void) {
   size_t i;
   if (funcname_stack.n == 0) {
     var_unset("FUNCNAME");
+    var_make_array("BASH_LINENO", 0);	/* bash has the 0 of "main" even here */
+    var_aset("BASH_LINENO", 0, "0");
     return;
   }
   var_make_array("FUNCNAME", 0);
   for (i = 0; i < funcname_stack.n; i++)
     var_aset("FUNCNAME", (long long)i, funcname_stack.v[funcname_stack.n - 1 - i]);
   var_aset("FUNCNAME", (long long)funcname_stack.n, "main");
+  /* BASH_LINENO[i]: the line FUNCNAME[i] was called from */
+  var_make_array("BASH_LINENO", 0);
+  for (i = 0; i < callline_stack.n; i++)
+    var_aset("BASH_LINENO", (long long)i, callline_stack.v[callline_stack.n - 1 - i]);
+  var_aset("BASH_LINENO", (long long)callline_stack.n, "0");	/* main */
 }
 
 
@@ -765,6 +776,11 @@ int func_call (Func *f, int argc, char **argv) {
   for (i = 1; i < argc; i++) vec_push(&sh_pos, xstrdup(argv[i]));
   var_scope_push();
   vec_push(&funcname_stack, xstrdup(f->name));
+  {	/* the call site, for BASH_LINENO and caller */
+    char num[24];
+    sprintf(num, "%d", sh_lineno);
+    vec_push(&callline_stack, xstrdup(num));
+  }
   update_funcname();
   source_push(source_top());
   func_depth++;
@@ -776,7 +792,8 @@ int func_call (Func *f, int argc, char **argv) {
   }
   return_frames--;
   func_depth--;
-  if (traps[TRAP_RETURN] != NULL && traps[TRAP_RETURN][0] != '\0' && !in_trap) {
+  if (traps[TRAP_RETURN] != NULL && traps[TRAP_RETURN][0] != '\0' && !in_trap &&
+      (func_depth == 0 || O("functrace"))) {
     in_trap++;
     sh_run_string(traps[TRAP_RETURN], "trap", 1);
     in_trap--;
@@ -784,6 +801,10 @@ int func_call (Func *f, int argc, char **argv) {
   source_pop();
   free(funcname_stack.v[--funcname_stack.n]);
   funcname_stack.v[funcname_stack.n] = NULL;
+  if (callline_stack.n > 0) {
+    free(callline_stack.v[--callline_stack.n]);
+    callline_stack.v[callline_stack.n] = NULL;
+  }
   update_funcname();
   var_scope_pop();
   vec_free(&sh_pos);
@@ -903,7 +924,40 @@ void sh_exit_now (int status) {
 }
 
 
+/*
+** Like bash: inside a function the ERR trap only fires with set -E
+** (errtrace), and DEBUG and RETURN only with set -T (functrace).
+*/
+static int trap_reaches_here (const char *option) {
+  return func_depth == 0 || O(option);
+}
+
+
+/* $BASH_COMMAND and the DEBUG trap: before every simple command */
+void sh_before_command (char **argv, int argc) {
+  Buf b;
+  int i;
+  if (argc <= 0 || in_trap) return;	/* a trap does not overwrite it */
+  buf_init(&b);
+  for (i = 0; i < argc; i++) {
+    if (i > 0) buf_putc(&b, ' ');
+    buf_puts(&b, argv[i]);
+  }
+  var_set("BASH_COMMAND", b.s ? b.s : "");
+  if (traps[TRAP_DEBUG] != NULL && traps[TRAP_DEBUG][0] != '\0' && !in_trap &&
+      trap_reaches_here("functrace")) {
+    int saved = sh_status;
+    in_trap++;
+    sh_run_string(traps[TRAP_DEBUG], "trap", 1);
+    in_trap--;
+    sh_status = saved;
+  }
+  buf_free(&b);
+}
+
+
 static void err_trap (int status) {
+  if (!trap_reaches_here("errtrace")) return;
   if (traps[TRAP_ERR] != NULL && traps[TRAP_ERR][0] != '\0' && !in_trap) {
     in_trap++;
     sh_run_string(traps[TRAP_ERR], "trap", 1);
@@ -1597,6 +1651,19 @@ static int run_argv (Vec *argv, char **assigns, int nassigns, int flags) {
       temp_restore(saved, n);
       return status;
     }
+    /* shopt -s autocd: a folder name alone means cd into it */
+    if (O("autocd") && argv->n == 1 && sh_interactive) {
+      char *dir = path_to_native(name);
+      int is_dir = (os_stat(dir, &st) == 0 && st.is_dir);
+      free(dir);
+      if (is_dir) {
+        char *a[3];
+        a[0] = "cd";
+        a[1] = (char *)name;
+        a[2] = NULL;
+        return sh_eval_argv(2, a, sh_fd[0], sh_fd[1], sh_fd[2], EX_NOFUNC);
+      }
+    }
     if (!(flags & EX_NOFUNC) && (f = func_find("command_not_found_handle")) != NULL) {
       Vec a;
       vec_init(&a);
@@ -1722,6 +1789,7 @@ static int exec_simple (Node *n) {
   }
   if (argv.n == 0) {	/* only assignments and redirections */
     status = 0;
+    sh_before_command(n->assigns, n->nassigns);
     if (apply_redirs(n->redir, &sv) != 0) status = 1;
     fd_restore(&sv);
     if (status == 0) status = assign_only(n);
@@ -1730,6 +1798,7 @@ static int exec_simple (Node *n) {
     return status;
   }
   if (O("xtrace")) xtrace(argv.v, (int)argv.n, n->assigns, n->nassigns);
+  sh_before_command(argv.v, (int)argv.n);
   if (strcmp(argv.v[0], "exec") == 0 && func_find("exec") == NULL) {
     status = do_exec(&argv, n);
     vec_free(&argv);

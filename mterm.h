@@ -70,6 +70,8 @@ typedef struct Grid {
   unsigned char *tabs;
   /* modes */
   int autowrap, cursor_on, app_cursor, bracketed, focus_events, insert;
+  int mouse;	/* 0 off, or the mode: 9, 1000, 1002, 1003 */
+  int mouse_sgr;	/* 1006: the report is text, not bytes */
   int cursor_shape;	/* DECSCUSR 0..6 */
   int all_dirty;
 } Grid;
@@ -130,6 +132,7 @@ typedef struct Vt {
   void (*reply) (void *ud, const char *s, size_t n);
   void (*title) (void *ud, const char *utf8);
   void (*bell) (void *ud);
+  void (*on_osc) (void *ud, int code, const char *text);	/* 4, 7, 10..12, 52 */
 } Vt;
 
 void vt_init (Vt *vt, Grid *g);

@@ -77,7 +77,8 @@ Android has no `/tmp`). mmc-term needs X11 or Cocoa, so Android gets the shell.
 | `mbvars.c` | `declare local export readonly unset set shopt shift getopts let` |
 | `mbio.c` | `echo printf read mapfile` |
 | `mbtest.c` | `test`, `[`, `[[ ]]` |
-| `mline.c` | line editor: history, Tab completion, UTF-8 |
+| `mline.c` | line editor: history, Ctrl-R search, Tab completion, UTF-8 |
+| `mcomp.c` | programmable completion: `complete`, `compgen`, `compopt` |
 | `mpath.c` | Linux style paths on Windows (`/d/env` = `D:\env`) |
 | `mos.c` | everything that differs between Windows and Linux/macOS |
 | `mutil.c` | memory, string buffer, string vector |
@@ -96,7 +97,7 @@ Android has no `/tmp`). mmc-term needs X11 or Cocoa, so Android gets the shell.
 | `ttest.c` | tests of the terminal core, without a window |
 | `stb_truetype.h` | font rasterizer by Sean Barrett, public domain, the only code not written here |
 | `HackNerdFontMono-*.ttf`, `HackNerdFont-LICENSE.md`, `HackNerdFont-README.md` | the default font: [Hack](https://sourcefoundry.org/hack/) v3.003 with the [Nerd Fonts](https://www.nerdfonts.com) v3.5.1 Powerline and icon glyphs (MIT / Bitstream Vera; the icon sets' licenses are in the README); `install` copies it to `usr/share/fonts` |
-| `tests/compat/` | 418 small bash scripts with what real bash printed for them; `tests/run.sh` compares mmc |
+| `tests/compat/` | 420 small bash scripts with what real bash printed for them; `tests/run.sh` compares mmc |
 
 ## Install on Windows
 
@@ -196,8 +197,19 @@ resize work). `./mmc-term --render-test out.bmp` draws a sample to an image
 without opening any window: if that picture is right, the core and the fonts
 work and only the window backend is left to look at.
 
-Not there (yet): tabs, re-wrapping text on resize, mouse reporting to programs
-(the mouse in vim), color emoji, ligatures, search, clickable links.
+The mouse reaches the programs: when one asks for it (`?1000`, `?1002`,
+`?1003`, with the SGR reports of `?1006`), clicks, drags and the wheel are
+sent on, so the mouse works in vim, htop and lazygit. Holding **Shift**
+takes the mouse back for selecting text, as in xterm.
+
+Programs can also ask the window things: `OSC 10/11/12` for the text,
+background and cursor color (nvim reads them to pick its theme, and setting
+them works too), `OSC 4` for a palette color, `OSC 52` to put something in
+the clipboard, and `OSC 7`, with which the shell says where it is, so
+Ctrl+Shift+N opens the new window in the same folder.
+
+Not there (yet): tabs, re-wrapping text on resize, color emoji, ligatures,
+search, clickable links.
 
 ## Settings
 
@@ -255,7 +267,13 @@ Variables set by mmc: `HOME`, `USER`, `HOSTNAME`, `SHELL`, `MMC_ROOT`,
 use bash features), `BASH_VERSINFO`, `OSTYPE` (`msys` on Windows, as in
 git-bash), `MACHTYPE`, `HOSTTYPE`, `PPID`, `UID`, `SHLVL`, `PWD`, `OLDPWD`,
 `RANDOM`, `SECONDS`, `LINENO`, `EPOCHSECONDS`, `PIPESTATUS`, `FUNCNAME`,
-`BASH_SOURCE`, `BASH_REMATCH`, `DIRSTACK`, `BASH_SUBSHELL`, `IFS`, `PS1`-`PS4`.
+`BASH_SOURCE`, `BASH_LINENO`, `BASH_COMMAND`, `BASH_REMATCH`, `DIRSTACK`,
+`BASH_SUBSHELL`, `IFS`, `PS1`-`PS4`.
+
+Variables mmc reads: `PROMPT_COMMAND` (run before every prompt; an array
+works too), `HISTFILE`, `HISTSIZE`, `HISTFILESIZE` and `HISTCONTROL`
+(`ignorespace`, `ignoredups`, `ignoreboth`, `erasedups`; unset means
+`ignoreboth`, which is what mmc always did).
 
 ## Paths (Windows)
 
@@ -285,7 +303,7 @@ settings are `$MMC_ROOT/etc/profile` and `$MMC_ROOT/home/<user>/.mmcrc`.
 
 ## What the shell can do
 
-mmc runs bash scripts. `tests/compat` has 418 cases taken from how the scripts
+mmc runs bash scripts. `tests/compat` has 420 cases taken from how the scripts
 on a developer PC really use bash (git, gradle, flutter, npm, emsdk, the
 Android SDK: see `tests/compat/RESEARCH.md`); mmc gives the same output and
 exit status as bash 5.3 for all of them.
@@ -314,10 +332,27 @@ shopt source suspend test times trap true type typeset ulimit umask unalias
 unset wait`. Small fallbacks, used only when no program with that name is in
 the PATH: `ls` (`-a -l`), `cat`, `clear`, `mkdir` (`-p`), `env`, `which`.
 
+**Completion of a command's own arguments** works as in bash: `complete`,
+`compgen` and `compopt` with `-F -C -W -G -P -S -X -A`, the letters
+`-abcdefgjksuv`, the `-o` options (`nospace`, `filenames`, `dirnames`,
+`default`, `bashdefault`, `plusdirs`, `nosort`, `noquote`) and the `-D`,
+`-E` and `-I` rules; the function gets `COMP_WORDS`, `COMP_CWORD`,
+`COMP_LINE`, `COMP_POINT` and answers in `COMPREPLY`. So git's own
+`git-completion.bash` works: put this in `~/.mmcrc` and Tab gives you
+subcommands, branches and options.
+
+```sh
+source $MMC_DRIVE/PortableGit/mingw64/share/git/completion/git-completion.bash
+```
+
+`mmc --complete 'git checkout '` prints what Tab would offer for that line,
+without a terminal - useful when a completion script does not behave.
+
 ```
 mmc -c 'command' [$0 [$1 ...]]    mmc script.sh args    mmc -s < commands
 mmc -e -x -o pipefail ...         mmc -n script.sh      #!/usr/bin/env mmc
 mmc --check a.sh b.sh             syntax, and commands that are not there
+mmc --complete 'git ch'           what Tab would offer for that line
 ```
 
 `mmc --check` reads scripts without running them and reports syntax errors
@@ -333,9 +368,13 @@ that gets the variables, functions and options; `cmd &` does the same for
 shell code. Like bash, the last stage of a pipeline runs in a subshell unless
 `shopt -s lastpipe`. Everything is one code path on every system.
 
-Keys: Tab completes commands, functions and files, Up/Down history,
-Left/Right, Ctrl-Left/Right by word, Home/End, Ctrl-A/E/K/U/W/L, Ctrl-C drops
-the line (and stops a running loop), Ctrl-D leaves. An unfinished command
+Keys: Tab completes commands, functions, files and, where a `complete`
+rule says so, a command's own arguments (git branches ...), Up/Down history,
+**Ctrl-R searches the history while you type** (Ctrl-R again for the next
+match further back, Ctrl-S forward, Enter runs it, Esc keeps the line for
+editing, Ctrl-G drops it), Left/Right, Ctrl-Left/Right by word, Home/End,
+Ctrl-A/E/K/U/W/L, Ctrl-C drops the line (and stops a running loop),
+Ctrl-D leaves. An unfinished command
 (`if` without `fi`, an open quote, a `\` at the end) asks for more with `> `.
 Pasting several lines puts them into the line (shown as a return sign) and
 runs them together when you press Enter. On Windows `.exe .com .cmd .bat` are
@@ -343,9 +382,19 @@ found without typing the extension, and scripts starting with `#!` run with
 their interpreter (`#!/bin/sh` and `#!/bin/bash` use mmc when there is no
 `sh` in the PATH).
 
+History expansion works in an interactive shell (`set +H` switches it off):
+`!!`, `!n`, `!-n`, `!word`, `!?word?`, the words `!^ !$ !* !!:2 !!:2-3`, the
+parts `:h :t :r :e`, `:p` (only show it), `:s/old/new/` (`:gs` for every
+place) and `^old^new` to run the last line again with one word changed.
+
 Not there (yet): `coproc`, stopping a program with Ctrl-Z (Windows has no
-such thing; `fg` waits for a background job), `fc` beyond `fc -l`, and
-history expansion with `!` (`!!`, `!$`).
+such thing; `fg` waits for a background job), and `fc` beyond `fc -l`.
+`ulimit` reports what mmc has and says so when it cannot change a limit.
+These `shopt` options are accepted but do nothing: `cdspell`, `dirspell`,
+`execfail`, `extdebug`, `inherit_errexit`, `localvar_inherit`,
+`localvar_unset`, `globskipdots`, `cdable_vars` and the `compat*` ones;
+`autocd`, `checkjobs`, `huponexit`, `histappend`, `lastpipe`, `extglob`,
+`nullglob`, `dotglob`, `globstar`, `nocaseglob` and `nocasematch` do work.
 
 ## How git-bash does it
 
@@ -360,10 +409,10 @@ calls the Win32 API on Windows and the POSIX API on Linux/macOS (see `mos.c`).
 ## Tested
 
 Windows 11: builds with zero warnings (`-std=c11 -Wall -Wextra -pedantic`);
-`tests/run.sh` passes all 418 bash compatibility cases, also when mmc runs
+`tests/run.sh` passes all 420 bash compatibility cases, also when mmc runs
 the test script itself; `mmc --check` reads the 70 shell scripts of
 PortableGit, Flutter, emsdk and the Android SDK without a syntax error;
-`build test` passes the 111 checks of the terminal core.
+`build test` passes the 124 checks of the terminal core.
 Linux, macOS and Android: compile cleanly (x86_64, aarch64, and arm for
 Android), not yet run.
 Windows 10 or newer is needed (the console must understand VT sequences).

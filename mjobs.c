@@ -105,6 +105,15 @@ int job_count (void) {
 }
 
 
+/* shopt -s huponexit: the background jobs go when the shell goes */
+void job_hup_all (void) {
+  int i, k;
+  for (i = 0; i < njobs; i++)
+    for (k = 0; k < jobs[i]->nprocs; k++)
+      if (jobs[i]->pids[k] > 0) os_kill(jobs[i]->pids[k], 15);
+}
+
+
 Job *job_by_pid (long pid) {
   int i, k;
   for (i = 0; i < njobs; i++)
@@ -584,23 +593,32 @@ int b_umask (int argc, char **argv, int in, int out, int err) {
 }
 
 
+/*
+** mmc keeps no limits of its own: what it reports is what the system
+** gives it, and a limit it cannot set it says so about instead of
+** quietly accepting it.
+*/
 int b_ulimit (int argc, char **argv, int in, int out, int err) {
   int i;
   (void)in; (void)err;
   for (i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-a") == 0) {
-      fd_puts(out, "core file size          (blocks, -c) 0\n"
-                   "data seg size           (kbytes, -d) unlimited\n"
-                   "file size               (blocks, -f) unlimited\n"
-                   "open files                      (-n) 3200\n"
-                   "pipe size            (512 bytes, -p) 8\n"
-                   "stack size              (kbytes, -s) 2032\n"
-                   "cpu time               (seconds, -t) unlimited\n"
-                   "max user processes              (-u) 256\n"
-                   "virtual memory          (kbytes, -v) unlimited\n");
+      fd_printf(out, "open files                      (-n) %d\n", MMC_FDS);
+      fd_puts(out, "everything else                      unlimited (mmc sets no limits)\n");
       return 0;
     }
-    if (argv[i][0] != '-') return 0;	/* setting a limit: accepted, nothing to do */
+    if (argv[i][0] == '-' && i + 1 < argc && argv[i + 1][0] != '-') {
+      sh_error("ulimit: %s: mmc cannot change limits", argv[i]);
+      return 1;
+    }
+    if (argv[i][0] != '-') {
+      sh_error("ulimit: mmc cannot change limits");
+      return 1;
+    }
+    if (strchr(argv[i], 'n') != NULL) {
+      fd_printf(out, "%d\n", MMC_FDS);
+      return 0;
+    }
   }
   fd_puts(out, "unlimited\n");
   return 0;

@@ -874,15 +874,22 @@ static int b_history (int argc, char **argv, int in, int out, int err) {
     line_hist_delete(atoi(argv[2]) - 1);
     return 0;
   }
-  if (argc > 1 && (strcmp(argv[1], "-w") == 0 || strcmp(argv[1], "-a") == 0)) {
-    if (argc > 2) {
-      char *native = path_to_native(argv[2]);
-      line_hist_write(native);
-      free(native);
+  if (argc > 1 && (strcmp(argv[1], "-w") == 0 || strcmp(argv[1], "-a") == 0 ||
+                   strcmp(argv[1], "-r") == 0 || strcmp(argv[1], "-n") == 0)) {
+    const char *file = argc > 2 ? argv[2] : var_get("HISTFILE");
+    char *native;
+    if (file == NULL || file[0] == '\0') {
+      const char *cur = line_hist_file();
+      if (cur == NULL) return 0;
+      native = xstrdup(cur);
     }
+    else native = path_to_native(file);
+    if (strcmp(argv[1], "-w") == 0) line_hist_write(native);
+    else if (strcmp(argv[1], "-a") == 0) line_hist_append(native);
+    else line_hist_load(native);	/* -r, -n: read the file back in */
+    free(native);
     return 0;
   }
-  if (argc > 1 && (strcmp(argv[1], "-r") == 0 || strcmp(argv[1], "-n") == 0)) return 0;
   if (argc > 1 && isdigit((unsigned char)argv[1][0])) {
     size_t n = (size_t)atol(argv[1]);
     if (n < h->n) from = h->n - n;
@@ -1013,105 +1020,13 @@ static int b_unalias (int argc, char **argv, int in, int out, int err) {
 }
 
 
-/* complete, compopt and bind: bashrc files call them; nothing to do */
+/* bind: bashrc files call it; mmc has no key bindings to change */
 static int b_accept (int argc, char **argv, int in, int out, int err) {
   (void)argc; (void)argv; (void)in; (void)out; (void)err;
   return 0;
 }
 
 
-static int b_compgen (int argc, char **argv, int in, int out, int err) {
-  Vec cands, words;
-  const char *prefix = "";
-  int i;
-  size_t k;
-  (void)in; (void)err;
-  vec_init(&cands);
-  vec_init(&words);
-  for (i = 1; i < argc; i++) {
-    const char *a = argv[i];
-    if (a[0] != '-' || a[1] == '\0') {
-      prefix = a;
-      continue;
-    }
-    if (strcmp(a, "--") == 0) {
-      if (i + 1 < argc) prefix = argv[++i];
-      continue;
-    }
-    if (strcmp(a, "-W") == 0 && i + 1 < argc) {	/* the list, split on blanks */
-      const char *s = argv[++i];
-      while (*s) {
-        size_t n;
-        while (*s == ' ' || *s == '\t' || *s == '\n') s++;
-        n = strcspn(s, " \t\n");
-        if (n > 0) vec_push(&words, xstrndup(s, n));
-        s += n;
-      }
-      continue;
-    }
-    if (strcmp(a, "-A") == 0 && i + 1 < argc) {
-      const char *act = argv[++i];
-      if (strcmp(act, "function") == 0) func_names(&cands);
-      else if (strcmp(act, "variable") == 0) var_names(&cands, "", 0);
-      else if (strcmp(act, "alias") == 0) alias_names(&cands);
-      else if (strcmp(act, "builtin") == 0) builtin_names(&cands);
-      continue;
-    }
-    {
-      const char *p;
-      for (p = a + 1; *p; p++) {
-        if (*p == 'a') alias_names(&cands);
-        else if (*p == 'b') builtin_names(&cands);
-        else if (*p == 'v') var_names(&cands, "", 0);
-        else if (*p == 'k') {
-          static const char *const kws[] = {"if", "then", "else", "elif", "fi", "case",
-            "esac", "for", "select", "while", "until", "do", "done", "in", "function",
-            "time", "{", "}", "!", "[[", "]]", "coproc", NULL};
-          int j;
-          for (j = 0; kws[j]; j++) vec_push(&cands, xstrdup(kws[j]));
-        }
-        else if (*p == 'f' || *p == 'd') {
-          Vec files;
-          char *dir = path_to_native(".");
-          size_t j;
-          vec_init(&files);
-          os_listdir(dir, &files);
-          for (j = 0; j < files.n; j++) {
-            OsStat st;
-            char *full = path_join(dir, files.v[j]);
-            if (*p == 'f' || (os_stat(full, &st) == 0 && st.is_dir)) vec_push(&cands, xstrdup(files.v[j]));
-            free(full);
-          }
-          vec_free(&files);
-          free(dir);
-        }
-        else if (*p == 'c') {
-          builtin_names(&cands);
-          alias_names(&cands);
-          func_names(&cands);
-        }
-      }
-    }
-  }
-  vec_sort(&cands);
-  {
-    int any = 0;
-    for (k = 0; k < words.n; k++)	/* -W words keep their order */
-      if (strncmp(words.v[k], prefix, strlen(prefix)) == 0) {
-        fd_printf(out, "%s\n", words.v[k]);
-        any = 1;
-      }
-    for (k = 0; k < cands.n; k++) {
-      if (strncmp(cands.v[k], prefix, strlen(prefix)) != 0) continue;
-      if (k > 0 && strcmp(cands.v[k], cands.v[k - 1]) == 0) continue;
-      fd_printf(out, "%s\n", cands.v[k]);
-      any = 1;
-    }
-    vec_free(&cands);
-    vec_free(&words);
-    return any ? 0 : 1;
-  }
-}
 
 /* }================================================================== */
 
@@ -1384,9 +1299,9 @@ static const Builtin builtins[] = {
   N("caller", b_caller, 0, NULL),
   N("cd", b_cd, 0, "cd [dir|-]           change directory (no dir: home)"),
   N("command", b_command, 0, "command [-vV] name   run name, not a function; -v: what it is"),
-  N("compgen", b_compgen, 0, NULL),
-  N("complete", b_accept, 0, NULL),
-  N("compopt", b_accept, 0, NULL),
+  N("compgen", b_compgen, 0, "compgen [opts] [word]  the candidates a completion would give"),
+  N("complete", b_complete, 0, "complete -F fn name  how a command completes its arguments"),
+  N("compopt", b_compopt, 0, NULL),
   N("continue", b_continue, B_SPECIAL, "continue [n]         next round of the loop"),
   N("declare", b_declare, B_DECL, "declare [-aAilnrux] name[=value]  variables and attributes"),
   N("dirs", b_dirs, 0, "dirs [-clpv]         the directory stack"),
