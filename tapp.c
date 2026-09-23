@@ -33,6 +33,7 @@ typedef struct Pane {
   int done;	/* the program ended */
   struct Tab *tab;
   int x, y, cols, rows;	/* its place in the tab, in cells */
+  int pointer;	/* OSC 22: 0 the I beam, 1 a hand, 2 an arrow */
 } Pane;
 
 /* how a tab is divided: one pane, or two parts side by side (vertical)
@@ -271,12 +272,29 @@ void app_on_dpi (float scale) {
 }
 
 
+/*
+** Ctrl+= / Ctrl+- / Ctrl+0, and OSC 50: the window stays as it is and the
+** grid grows or shrinks with the cells, so a full screen program sees a
+** new size at once (it used to keep the columns and resize the window,
+** which left the program's view unchanged).
+*/
 static void zoom (int delta) {
   int z = (delta == 0) ? 0 : A.zoom + delta;
   if (A.cfg.font_size + z < 6 || A.cfg.font_size + z > 72) return;
   A.zoom = z;
   apply_font();
-  refit_window();
+  if (A.win_w > 0 && A.win_h > 0) app_on_resize(A.win_w, A.win_h);
+  else refit_window();
+  touch();
+}
+
+/* OSC 50 with a size in points: the zoom that gets there */
+static void zoom_to (int size) {
+  if (size < 6 || size > 72) return;
+  A.zoom = size - A.cfg.font_size;
+  apply_font();
+  if (A.win_w > 0 && A.win_h > 0) app_on_resize(A.win_w, A.win_h);
+  else refit_window();
   touch();
 }
 
@@ -868,7 +886,8 @@ int app_hit_test (int x, int y) {
   }
   if (y >= TOP && x >= A.win_w - 14 && A.g->sb_len > 0 && !A.g->alt)
     return HIT_UI;	/* the scrollbar */
-  if (A.head == 0 || y >= A.head || y < 0) return HIT_CLIENT;
+  if (A.head == 0 || y >= A.head || y < 0)
+    return (CP != NULL && CP->pointer == 1) ? HIT_BUTTON : (CP != NULL && CP->pointer == 2) ? HIT_UI : HIT_CLIENT;
   return button_at(x, y) >= 0 ? HIT_BUTTON : HIT_CAPTION;
 }
 
@@ -1724,11 +1743,31 @@ static void osc_set_cwd (Pane *t, const char *text) {
 }
 
 
+static void zoom (int delta);
+static void zoom_to (int size);
+
 static void on_osc (void *ud, int code, const char *text) {
   Pane *t = (Pane *)ud;
   uint32_t rgb;
   if (code == 7) {
     osc_set_cwd(t, text);
+    return;
+  }
+  if (code == 22) {	/* the pointer's shape over the text: "pointer", "text", "" */
+    int was = t->pointer;
+    t->pointer = strcmp(text, "pointer") == 0 ? 1 : strcmp(text, "default") == 0 ? 2 : 0;
+    if (t->pointer != was) win_redraw();	/* WM_SETCURSOR asks again */
+    return;
+  }
+  if (code == 50) {	/* the font's size: "#+1" bigger, "#-1" smaller, "#0" back, "#14" or "14" */
+    if (text[0] == '#' && (text[1] == '+' || text[1] == '-')) zoom(atoi(text + 1));
+    else if (text[0] == '#' && text[1] == '\0') zoom(0);
+    else {
+      const char *n = text[0] == '#' ? text + 1 : strstr(text, "size=");
+      n = n ? (n[0] == 's' ? n + 5 : n) : NULL;
+      if (n && atoi(n) > 0) zoom_to(atoi(n));
+      else if (text[0] == '\0') zoom(0);
+    }
     return;
   }
   if (code == 52) {	/* the program puts something in the clipboard */
