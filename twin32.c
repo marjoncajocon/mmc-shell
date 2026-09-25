@@ -193,6 +193,10 @@ static int on_keydown (WPARAM vk) {
     else if (vk == VK_OEM_MINUS || vk == VK_SUBTRACT) cp = '-';
     else if (vk == VK_SPACE) cp = ' ';
     else if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) cp = (uint32_t)('0' + (vk - VK_NUMPAD0));
+    else if ((vk >= VK_OEM_1 && vk <= VK_OEM_8) || vk == VK_OEM_102) {	/* / . , ; ' [ ] \ `: Ctrl+/ makes no WM_CHAR */
+      UINT ch = MapVirtualKeyW((UINT)vk, MAPVK_VK_TO_CHAR);	/* the key's own character, this layout's */
+      if (ch >= 0x20 && ch < 0x7F) cp = (uint32_t)ch;	/* a dead key has its top bit set */
+    }
     if (cp != 0 && app_on_key(TK_CHAR, mods, cp)) {
       swallow_char = 1;
       return 1;

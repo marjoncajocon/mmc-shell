@@ -772,6 +772,10 @@ int app_on_key (int key, int mods, uint32_t cp) {
   }
   if (shortcut(key, mods, cp)) return 1;
   if (kitty_key(key, mods, cp)) return 1;
+  if (key == TK_CHAR && (mods & TM_CTRL) && !(mods & TM_SHIFT) && cp == '/') {	/* Ctrl+/: ^_, as xterm sends it */
+    send_str((mods & TM_ALT) ? "\033\037" : "\037");
+    return 1;
+  }
   switch (key) {
     case TK_UP: send_csi(mods, 0, 'A'); break;
     case TK_DOWN: send_csi(mods, 0, 'B'); break;
