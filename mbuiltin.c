@@ -731,7 +731,7 @@ static int kind_of (const char *name, int skip_funcs, char **path) {
   if (!skip_funcs && func_find(name) != NULL) return K_FUNCTION;
   if (builtin_find(name, 0) != NULL && builtin_enabled(name)) return K_BUILTIN;
   if ((*path = sh_find_command(name)) != NULL) return K_FILE;
-  if (builtin_find(name, 1) != NULL) return K_BUILTIN;
+  if (builtin_fallback(name) != NULL) return K_BUILTIN;
   return K_NONE;
 }
 
@@ -1417,170 +1417,6 @@ static int b_clear (int argc, char **argv, int in, int out, int err) {
 }
 
 
-static int b_cat (int argc, char **argv, int in, int out, int err) {
-  char chunk[16384];
-  int i, status = 0;
-  (void)err;
-  for (i = 1; i < argc || i == 1; i++) {
-    int fd = in, opened = 0;
-    long n;
-    if (i < argc && strcmp(argv[i], "-") != 0) {
-      char *native = path_to_native(argv[i]);
-      fd = os_open(native, OS_READ);
-      free(native);
-      if (fd < 0) {
-        sh_error("cat: %s: No such file or directory", argv[i]);
-        status = 1;
-        continue;
-      }
-      opened = 1;
-    }
-    while ((n = os_read(fd, chunk, sizeof(chunk))) > 0)
-      if (os_write(out, chunk, (size_t)n) < 0) break;
-    if (opened) os_close(fd);
-  }
-  return status;
-}
-
-
-static int b_mkdir (int argc, char **argv, int in, int out, int err) {
-  int i, parents = 0, status = 0;
-  (void)in; (void)out; (void)err;
-  for (i = 1; i < argc; i++) {
-    char *native;
-    int r;
-    if (strcmp(argv[i], "-p") == 0) {
-      parents = 1;
-      continue;
-    }
-    native = path_to_native(argv[i]);
-    r = parents ? mkdir_p(native) : os_mkdir(native);
-    if (r != 0) {
-      sh_error("mkdir: cannot create directory '%s'", argv[i]);
-      status = 1;
-    }
-    free(native);
-  }
-  return status;
-}
-
-
-static void ls_long (int out, const char *dir, const char *name, int color) {
-  char when[32], size[24];
-  OsStat st;
-  struct tm *tm;
-  char *full = dir ? path_join(dir, name) : xstrdup(name);
-  os_stat(full, &st);
-  free(full);
-  tm = localtime(&st.mtime);
-  if (tm == NULL || strftime(when, sizeof(when), "%Y-%m-%d %H:%M", tm) == 0)
-    strcpy(when, "                ");
-  ll_to_str(st.size, size);
-  fd_printf(out, "%s %12s %s %s%s%s%s\n", st.is_dir ? "d" : "-", size, when,
-            (color && st.is_dir) ? "\033[1;34m" : "", name,
-            (color && st.is_dir) ? "\033[0m" : "", st.is_dir ? "/" : "");
-}
-
-
-static void ls_dir (int out, const char *native, int all, int lng) {
-  Vec names, shown;
-  size_t i, width = 0, cols, rows, r, c;
-  int tty = os_is_tty(out);
-  vec_init(&names);
-  vec_init(&shown);
-  os_listdir(native, &names);
-  vec_sort(&names);
-  for (i = 0; i < names.n; i++) {
-    if (names.v[i][0] == '.' && !all) continue;
-    if (lng) ls_long(out, native, names.v[i], tty);
-    else {
-      OsStat st;
-      char *full = path_join(native, names.v[i]);
-      os_stat(full, &st);
-      free(full);
-      vec_push(&shown, xstrcat3(names.v[i], st.is_dir ? "/" : "", ""));
-    }
-  }
-  for (i = 0; i < shown.n; i++) {
-    size_t w = utf8_count(shown.v[i], strlen(shown.v[i]));
-    if (w > width) width = w;
-  }
-  width += 2;
-  cols = tty ? (size_t)os_term_cols() / width : 1;
-  if (cols < 1) cols = 1;
-  rows = (shown.n + cols - 1) / cols;
-  for (r = 0; r < rows; r++) {	/* column-major, like ls */
-    Buf line;
-    buf_init(&line);
-    for (c = 0; c < cols; c++) {
-      const char *s;
-      size_t n, w;
-      int dir;
-      if ((i = c * rows + r) >= shown.n) break;
-      s = shown.v[i];
-      n = strlen(s);
-      w = utf8_count(s, n);
-      dir = (n > 0 && s[n - 1] == '/');
-      if (tty && dir) buf_puts(&line, "\033[1;34m");
-      buf_puts(&line, s);
-      if (tty && dir) buf_puts(&line, "\033[0m");
-      if ((c + 1) * rows + r < shown.n)
-        for (; w < width; w++) buf_putc(&line, ' ');
-    }
-    buf_putc(&line, '\n');
-    os_write(out, line.s, line.len);
-    buf_free(&line);
-  }
-  vec_free(&names);
-  vec_free(&shown);
-}
-
-
-static int b_ls (int argc, char **argv, int in, int out, int err) {
-  Vec paths;
-  int i, all = 0, lng = 0, status = 0;
-  size_t k;
-  (void)in; (void)err;
-  vec_init(&paths);
-  for (i = 1; i < argc; i++) {
-    const char *a = argv[i];
-    if (a[0] == '-' && a[1] != '\0') {
-      for (a++; *a; a++) {
-        if (*a == 'a' || *a == 'A') all = 1;
-        else if (*a == 'l') lng = 1;
-        else if (*a != '1' && *a != 'h' && *a != 'F') {
-          sh_error("ls: unknown option -%c (builtin ls knows -a -l)", *a);
-          vec_free(&paths);
-          return 2;
-        }
-      }
-    }
-    else vec_push(&paths, xstrdup(a));
-  }
-  if (paths.n == 0) vec_push(&paths, xstrdup("."));
-  for (k = 0; k < paths.n; k++) {
-    OsStat st;
-    char *native = path_to_native(paths.v[k]);
-    os_stat(native, &st);
-    if (!st.exists) {
-      sh_error("ls: %s: No such file or directory", paths.v[k]);
-      status = 1;
-    }
-    else if (!st.is_dir) {
-      if (lng) ls_long(out, NULL, native, 0);
-      else fd_printf(out, "%s\n", paths.v[k]);
-    }
-    else {
-      if (paths.n > 1) fd_printf(out, "%s%s:\n", k ? "\n" : "", paths.v[k]);
-      ls_dir(out, native, all, lng);
-    }
-    free(native);
-  }
-  vec_free(&paths);
-  return status;
-}
-
-
 /* env [NAME=value ...] [command args]: the fallback when there is no env */
 static int b_env (int argc, char **argv, int in, int out, int err) {
   int i = 1;
@@ -1722,13 +1558,58 @@ static const Builtin builtins[] = {
   N("unalias", b_unalias, 0, "unalias name|-a      remove aliases"),
   N("unset", b_unset, B_SPECIAL, "unset [-fv] name     remove a variable or function"),
   N("wait", b_wait, 0, "wait [pid|%job]      wait for background jobs"),
-  /* fallbacks */
-  N("ls", b_ls, B_FALLBACK, "ls [-a] [-l] [path]  list files"),
-  N("cat", b_cat, B_FALLBACK, "cat [file...]        print files"),
+  /* fallbacks: the tools (c*.c), used when PATH has no program of that name */
+  N("awk", t_awk, B_FALLBACK, "awk [-F fs] [-v a=b] [-f file | 'prog'] [file...]  pattern scanning language"),
+  N("basename", t_basename, B_FALLBACK, "basename path [suffix]  the last part of a path"),
+  N("cal", t_cal, B_FALLBACK, "cal [-3my] [[month] year]  a calendar"),
+  N("cat", t_cat, B_FALLBACK, "cat [-nbsAET] [file...]  print files"),
+  N("chmod", t_chmod, B_FALLBACK, "chmod [-Rvcf] mode file...  permissions (Windows: w = not read-only)"),
   N("clear", b_clear, B_FALLBACK, "clear                clear the screen"),
-  N("mkdir", b_mkdir, B_FALLBACK, "mkdir [-p] dir       create directories"),
+  N("cp", t_cp, B_FALLBACK, "cp [-rafinuvlsLPT] [-t dir] src... dst  copy files and folders"),
+  N("cut", t_cut, B_FALLBACK, "cut -b|-c|-f list [-d x] [-s] [file...]  parts of lines"),
+  N("df", t_df, B_FALLBACK, "df [-hT] [path...]   free disk space"),
+  N("diff", t_diff, B_FALLBACK, "diff [-uqrNiwbs] [-U N] a b  compare files or folders"),
+  N("dirname", t_dirname, B_FALLBACK, "dirname path...      the folder part of a path"),
   N("env", b_env, B_FALLBACK, "env [a=b] [cmd]      print the environment / run cmd"),
+  N("du", t_du, B_FALLBACK, "du [-shacb] [-d N] [path...]  disk usage"),
+  N("egrep", t_egrep, B_FALLBACK, NULL),
+  N("fgrep", t_fgrep, B_FALLBACK, NULL),
+  N("file", t_file, B_FALLBACK, "file [-bi] path...   what kind of file"),
+  N("find", t_find, B_FALLBACK | B_WINSYS, "find [path...] [-name x -type f -mtime -1 -exec ...]  search files"),
+  N("grep", t_grep, B_FALLBACK, "grep [-EFivwxcloqnhHrR] [-e pat] [-A N -B N -C N] pattern [file...]  search"),
+  N("gawk", t_awk, B_FALLBACK, NULL),
+  N("gunzip", t_gunzip, B_FALLBACK, "gunzip [-ckf] file.gz...  uncompress"),
+  N("gzip", t_gzip, B_FALLBACK, "gzip [-cdkfv1-9] [file...]  compress (.gz)"),
+  N("head", t_head, B_FALLBACK, "head [-n N] [-c N] [file...]  the first lines"),
+  N("hostname", t_hostname, B_FALLBACK | B_WINSYS, "hostname [-s]        the computer's name"),
+  N("id", t_id, B_FALLBACK, "id [-ugn]            user and group ids"),
+  N("ln", t_ln, B_FALLBACK, "ln [-sfnvT] target [link]  make links"),
+  N("ls", t_ls, B_FALLBACK, "ls [-alhrtSRdF1] [--color] [path...]  list files"),
+  N("mkdir", t_mkdir, B_FALLBACK, "mkdir [-pv] [-m mode] dir...  create folders"),
+  N("mv", t_mv, B_FALLBACK, "mv [-finuvT] [-t dir] src... dst  move or rename"),
+  N("ps", t_ps, B_FALLBACK, "ps [-ef] [aux] [-p pid] [-o fields]  processes"),
+  N("readlink", t_readlink, B_FALLBACK, "readlink [-femn] path  where a link points; -f: full path"),
+  N("realpath", t_realpath, B_FALLBACK, "realpath [-em] path  the full path"),
+  N("rm", t_rm, B_FALLBACK, "rm [-rfiIdv] path...  remove files and folders"),
+  N("rmdir", t_rmdir, B_FALLBACK, "rmdir [-pv] dir...   remove empty folders"),
+  N("sed", t_sed, B_FALLBACK, "sed [-nEsz] [-i[sfx]] [-e script] [-f file] [script] [file...]  edit a stream"),
+  N("seq", t_seq, B_FALLBACK, "seq [-w] [-s sep] [first [step]] last  numbers"),
+  N("sleep", t_sleep, B_FALLBACK, "sleep N[smhd]...     wait"),
+  N("sort", t_sort, B_FALLBACK | B_WINSYS, "sort [-nrufbhVRs] [-k key] [-t x] [-o file] [file...]  sort lines"),
+  N("tail", t_tail, B_FALLBACK, "tail [-n N|+N] [-c N] [-f] [file...]  the last lines"),
+  N("tar", t_tar, B_FALLBACK, "tar -c|-x|-t [-zvO] [-f file] [-C dir] [--strip-components N] [path...]  archives"),
+  N("tee", t_tee, B_FALLBACK, "tee [-a] file...     copy input to files and output"),
+  N("touch", t_touch, B_FALLBACK, "touch [-acm] [-d date] [-r file] file...  create, set times"),
+  N("tr", t_tr, B_FALLBACK, "tr [-dsc] set1 [set2]  translate or delete characters"),
+  N("uname", t_uname, B_FALLBACK, "uname [-asnrmo]      system name"),
+  N("uniq", t_uniq, B_FALLBACK, "uniq [-cdui] [-f N] [-s N] [in [out]]  drop repeated lines"),
+  N("watch", t_watch, B_FALLBACK, "watch [-n secs] [-dtge] command  run a command again and again"),
+  N("unzip", t_unzip, B_FALLBACK, "unzip [-lotnqjp] [-d dir] file.zip [member...]  extract a zip"),
+  N("wc", t_wc, B_FALLBACK, "wc [-lwcmL] [file...]  count lines, words, bytes"),
   N("which", b_which, B_FALLBACK, "which name           where a program is"),
+  N("whoami", t_whoami, B_FALLBACK | B_WINSYS, "whoami               your user name"),
+  N("zcat", t_zcat, B_FALLBACK, "zcat file.gz...      print compressed files"),
+  N("zip", t_zip, B_FALLBACK, "zip [-rqj0-9] [-x pat...] file.zip path...  make a zip"),
   {NULL, NULL, 0, NULL}
 };
 
@@ -1771,6 +1652,22 @@ static int b_help (int argc, char **argv, int in, int out, int err) {
     "Check:   mmc --check script.sh   (syntax and commands, without running)\n"
     "Keys:    Tab completes, Up/Down history, Ctrl-A/E/K/U/W/L, Ctrl-D exits\n");
   return 0;
+}
+
+
+/* a fallback by its name, or by /bin/NAME /usr/bin/NAME as scripts write it */
+const Builtin *builtin_fallback (const char *name) {
+  static const char *const dirs[] = {"/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/",
+                                     "/usr/sbin/", NULL};
+  int k;
+  for (k = 0; dirs[k]; k++) {
+    size_t n = strlen(dirs[k]);
+    if (strncmp(name, dirs[k], n) == 0 && strchr(name + n, '/') == NULL) {
+      name += n;
+      break;
+    }
+  }
+  return builtin_find(name, 1);
 }
 
 

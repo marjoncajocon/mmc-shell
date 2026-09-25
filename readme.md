@@ -70,7 +70,7 @@ Android has no `/tmp`). mmc-term needs X11 or Cocoa, so Android gets the shell.
 | `mexpand.c` | expansion: braces, `~`, `${...}`, `$( )`, `$(( ))`, splitting, quotes |
 | `mpattern.c` | patterns (`* ? [ ]`, extglob) and filename globbing (`**`) |
 | `marith.c` | arithmetic: `$(( ))`, `(( ))`, `let`, subscripts |
-| `mregex.c` | extended regular expressions for `[[ x =~ re ]]` |
+| `mregex.c` | regular expressions (basic and extended, UTF-8, leftmost-longest): `[[ =~ ]]`, grep, sed, awk |
 | `mvar.c` | variables: scopes, attributes, arrays, the environment |
 | `mexec.c` | running the tree: pipelines, subshells, redirections, functions, traps |
 | `mjobs.c` | background jobs; `jobs wait kill trap umask ...` |
@@ -83,6 +83,17 @@ Android has no `/tmp`). mmc-term needs X11 or Cocoa, so Android gets the shell.
 | `mpath.c` | Linux style paths on Windows (`/d/env` = `D:\env`) |
 | `mos.c` | everything that differs between Windows and Linux/macOS |
 | `mutil.c` | memory, string buffer, string vector |
+| `ctool.c` | what every tool uses: GNU style options, buffered input and output; `basename dirname seq sleep` |
+| `cfile.c` | `ls cat mkdir rmdir rm cp mv touch ln readlink realpath` |
+| `cfind.c` | `find` |
+| `ctext.c` | `head tail tee cut sort uniq wc tr` |
+| `cgrep.c` | `grep egrep fgrep` |
+| `csed.c` | `sed` |
+| `cdiff.c` | `diff` (Myers' algorithm) |
+| `csys.c` | `chmod du df file uname hostname whoami id ps watch cal` |
+| `carch.c` | deflate and inflate, CRC-32; `gzip gunzip zcat tar` |
+| `czip.c` | `zip unzip` |
+| `cawk.c` | `awk` |
 | `mmc.rc`, `mmc.ico` | Windows only: the program icon and version details |
 | `mterm.h` | **mmc-term**, the terminal window: its one shared header |
 | `mterm.c` | `main` of mmc-term, command line |
@@ -437,8 +448,36 @@ command compgen complete compopt continue declare dirs disown echo enable eval
 exec exit export false fc fg getopts hash help history jobs kill let local
 logout mapfile popd printf pushd pwd read readarray readonly return set shift
 shopt source suspend test times trap true type typeset ulimit umask unalias
-unset wait`. Small fallbacks, used only when no program with that name is in
-the PATH: `ls` (`-a -l`), `cat`, `clear`, `mkdir` (`-p`), `env`, `which`.
+unset wait`.
+
+**The tools.** A Windows PC has no `cp`, `grep` or `tar` unless git-bash is
+installed, so mmc brings its own, written from scratch like the rest, with
+the GNU options and messages, so `cp -rfv src dst` looks the same on every
+system:
+
+| | |
+|---|---|
+| files | `ls cat cp mv rm rmdir mkdir touch ln find chmod du df file readlink realpath basename dirname` |
+| text | `grep egrep fgrep sed awk sort uniq cut head tail tee wc tr diff seq` |
+| archives | `tar` (with `-z`), `gzip gunzip zcat zip unzip` |
+| system | `ps watch uname hostname whoami id cal sleep env which clear` |
+
+They are used only when the PATH has no program of that name, so on Linux
+and macOS the system's own tools still answer. The exception is Windows'
+own `find.exe`, `sort.exe`, `hostname.exe` and `whoami.exe`, which are not
+the Linux ones: mmc's win over them (type `find.exe` for Windows' one).
+`builtin grep ...` runs mmc's version even when the PATH has another one,
+and `help` lists them all. In a pipeline they stream like programs
+(`tail -f log | grep x` works), and Ctrl-C stops them.
+
+What they do not do: `tar` knows gzip only (no bzip2, xz, zstd), `zip`
+has no encryption and no archives over 4 GB, `chmod` on Windows can only
+set or clear the read-only bit, `ln -s` on Windows needs Developer Mode (or
+an administrator), `sort` compares bytes (like `LC_ALL=C`), `grep -P` is
+`-E`, `diff` has no `-y`, `awk` is POSIX awk plus the gawk extensions
+people use most (`gensub`, `strftime`, `systime`, `length(array)`,
+`tolower`, `toupper`, `nextfile`, a regex `RS`, `IGNORECASE`) but not
+`asort`, `PROCINFO` or `@include`.
 
 **Completion of a command's own arguments** works as in bash: `complete`,
 `compgen` and `compopt` with `-F -C -W -G -P -S -X -A`, the letters
@@ -471,7 +510,7 @@ Scripts saved with Windows line ends (CR LF) are read like the others.
 How it works without `fork()` (Windows has none): `( )` and `$( )` run inside
 mmc on a copy of its state that is put back afterwards; in a pipeline programs
 run side by side, builtins in the middle run with their output kept and fed
-on, other shell code in the middle (loops, functions) runs in a child mmc
+on, the tools and other shell code in the middle (loops, functions) run in a child mmc
 that gets the variables, functions and options; `cmd &` does the same for
 shell code. Like bash, the last stage of a pipeline runs in a subshell unless
 `shopt -s lastpipe`. Everything is one code path on every system.

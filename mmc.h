@@ -112,7 +112,9 @@ typedef struct OsStat {
   int exists, is_dir, is_link, is_fifo, is_sock, is_chr, is_blk;
   unsigned mode;	/* permission bits, 0777 style */
   long long size;
-  time_t mtime, atime;
+  long long blocks;	/* 512 byte units on the disk */
+  unsigned long nlink;
+  time_t mtime, atime, ctime;
   unsigned long long dev, ino;
   long uid, gid;
 } OsStat;
@@ -163,6 +165,7 @@ char *os_username (void);
 long os_getpid (void);
 long os_getppid (void);
 long os_getuid (void);
+long os_getgid (void);
 long os_geteuid (void);
 long long os_now_us (void);	/* wall clock, microseconds */
 void os_times (double t[4]);	/* user, sys, children user, children sys */
@@ -202,6 +205,47 @@ void os_thread_join (OsThread *t);
 typedef struct OsNPipe OsNPipe;
 OsNPipe *os_npipe_new (const char *dir, int fd, int to_reader, char **path);	/* takes fd */
 void os_npipe_end (OsNPipe *np);
+
+/* for the tools (c*.c): what errno says elsewhere, Windows included */
+enum {
+  OS_E_OTHER = 1, OS_E_NOENT, OS_E_ACCES, OS_E_EXIST, OS_E_NOTEMPTY,
+  OS_E_NOTDIR, OS_E_ISDIR, OS_E_XDEV, OS_E_BUSY, OS_E_NOSPC, OS_E_PERM,
+  OS_E_INVAL, OS_E_LOOP
+};
+int os_errcode (void);	/* why the last os_ call failed: OS_E_... */
+const char *os_errmsg (void);	/* the same as text: "No such file or directory" */
+int os_rmdir (const char *native);
+int os_rename (const char *from, const char *to);	/* replaces 'to' */
+int os_chmod (const char *native, unsigned mode);	/* Windows: the write bits only */
+int os_utime (const char *native, time_t atime, time_t mtime);
+int os_symlink (const char *target, const char *native, int is_dir);
+int os_link (const char *from, const char *to);
+char *os_readlink (const char *native);	/* malloc'd, or NULL */
+int os_same_file (const char *a, const char *b);	/* 1: the same file */
+long long os_seek (int fd, long long off, int whence);	/* 0 set, 1 cur, 2 end; -1 */
+void os_sleep_ms (int ms);
+int os_diskfree (const char *native, unsigned long long *total,
+                 unsigned long long *avail, unsigned long long *free_);
+void os_mounts (Vec *out);	/* "device\tmount point\ttype" */
+typedef struct OsUname {
+  char sysname[64], release[64], version[128], machine[32], os[32];
+} OsUname;
+void os_uname (OsUname *u);
+typedef struct OsProcInfo {
+  long pid, ppid, uid;
+  long long rss, vsz;	/* bytes */
+  double cpu;	/* seconds used */
+  time_t start;
+  char *name;	/* the program */
+  char *cmd;	/* its command line, or the name */
+  char state;	/* R S Z T ..., '?' unknown */
+} OsProcInfo;
+int os_proclist (OsProcInfo **out, size_t *n);
+void os_proclist_free (OsProcInfo *v, size_t n);
+unsigned long long os_memtotal (void);
+char *os_user_name (long uid);	/* malloc'd; the number if unknown */
+char *os_group_name (long gid);
+int os_is_system_program (const char *native);	/* Windows: under %SystemRoot% */
 
 /* }================================================================== */
 
@@ -429,9 +473,23 @@ void glob_expand (const char *marked, Vec *out);	/* nothing if no match */
 int arith_eval (const char *expr, long long *out);	/* 0 ok, -1 error */
 
 typedef struct Regex Regex;
-Regex *regex_compile (const char *pat, int icase, char **err);
+Regex *regex_compile (const char *pat, int icase, char **err);	/* ERE */
 int regex_exec (Regex *re, const char *s, Vec *groups);	/* 1 match */
 void regex_free (Regex *re);
+#define RE_EXTENDED	1	/* ERE; else BRE (grep, sed) */
+#define RE_ICASE	2
+#define RE_NEWLINE	4	/* ^ $ at every line, . not a newline (sed M) */
+#define RE_AWK		8	/* \ escapes inside [...] */
+#define RE_WORDS	16	/* grep -w: no word character right before or after */
+#define RE_WHOLE	32	/* grep -x: the whole subject */
+#define RE_NOTBOL	1	/* regex_match: the start is not a line start */
+#define RE_NOTEOL	2
+Regex *regex_new (const char *pat, int flags, char **err);
+Regex *regex_new_n (const char *pat, size_t len, int flags, char **err);
+/* leftmost-longest match in s[0..len) at or after start; m (may be NULL):
+** 2 * (regex_nsub + 1) offsets, (size_t)-1 for a group that took no part */
+int regex_match (Regex *re, const char *s, size_t len, size_t start, int eflags, size_t *m);
+int regex_nsub (const Regex *re);
 
 /* }================================================================== */
 
@@ -596,6 +654,7 @@ typedef int (*BuiltinFn) (int argc, char **argv, int in, int out, int err);
 #define B_FALLBACK	1	/* only used when no external command is found */
 #define B_SPECIAL	2	/* POSIX special builtin */
 #define B_DECL		4	/* declaration builtin: a=(..) arguments */
+#define B_WINSYS	8	/* fallback that beats Windows' own program (find, sort) */
 
 typedef struct Builtin {
   const char *name;
@@ -605,6 +664,7 @@ typedef struct Builtin {
 } Builtin;
 
 const Builtin *builtin_find (const char *name, int fallback);
+const Builtin *builtin_fallback (const char *name);	/* "rm", "/bin/rm" ... */
 void builtin_names (Vec *out);
 int builtin_enabled (const char *name);
 const char *alias_get (const char *name);
@@ -650,6 +710,156 @@ int b_times (int argc, char **argv, int in, int out, int err);
 int b_umask (int argc, char **argv, int in, int out, int err);
 int b_ulimit (int argc, char **argv, int in, int out, int err);
 int b_suspend (int argc, char **argv, int in, int out, int err);
+
+/* }================================================================== */
+
+
+/*
+** {==================================================================
+** c*.c - the tools: everyday programs (ls cp rm grep sed sort tar awk
+** ...) as fallbacks, for the PCs that do not have them (Windows)
+** ===================================================================
+*/
+
+/* ctool.c: what every tool uses */
+typedef struct Out {	/* buffered output; 'failed' once a write fails */
+  int fd, failed;
+  int line;	/* a terminal: each line goes out at once */
+  size_t n;
+  char buf[32768];
+} Out;
+void out_init (Out *o, int fd);
+void out_putn (Out *o, const char *s, size_t n);
+void out_puts (Out *o, const char *s);
+void out_putc (Out *o, int c);
+void out_printf (Out *o, const char *fmt, ...);
+int out_flush (Out *o);	/* -1: a write failed */
+
+typedef struct In {	/* buffered input, line by line */
+  int fd, own, eof;
+  char *buf;
+  size_t cap, start, end;
+} In;
+void in_init (In *r, int fd, int own);
+int in_open (In *r, const char *arg, int stdin_fd);	/* "-": stdin; -1: failed */
+void in_close (In *r);
+int in_line (In *r, char **line, size_t *len, int delim, int *had_delim);	/* 0: end */
+long in_read (In *r, char *dst, size_t n);	/* raw bytes; 0: end */
+
+/* GNU style options: -abc, -n5, -n 5, --long, --long=x, options after
+** the operands; the operands end up in 'ops' */
+typedef struct LongOpt {
+  const char *name;
+  int key;
+  int arg;	/* 0 none, 1 required, 2 optional (--x=v only) */
+} LongOpt;
+typedef struct Opts {
+  const char *tool;
+  int argc, i, err, no_permute;
+  char **argv;
+  const char *cluster;	/* the rest of -abc */
+  const char *arg;	/* the option's argument */
+  Vec ops;	/* operands, in order */
+} Opts;
+#define OPT_HELP	(-2)
+#define OPT_BAD		'?'
+void opts_init (Opts *g, const char *tool, int argc, char **argv, int err);
+int opts_next (Opts *g, const char *spec, const LongOpt *lo);	/* 0: done */
+void opts_free (Opts *g);
+
+void tool_err (int err, const char *tool, const char *fmt, ...);
+int tool_help (int out, const char *tool);	/* the help line of the table */
+int tool_stop (void);	/* Ctrl-C pressed */
+int tool_utf8 (void);	/* characters are UTF-8 (not LC_ALL=C) */
+int tool_ask (int in, int err, const char *fmt, ...);	/* "rm: remove 'x'? " y/n */
+char *tool_join (const char *dir, const char *name);	/* "a" + "b" -> "a/b" */
+void human_size (char *out, unsigned long long v, int si);	/* 1.5K 23M */
+int parse_size (const char *s, long long *out);	/* 10 10k 5M 1G, b = 512 */
+int is_dot_or_dotdot (const char *name);
+char *glob_mark (const char *pat);	/* typed pattern (\x literal) -> marked, for pat_match */
+void mode_string (char out[11], const OsStat *st);	/* drwxr-xr-x */
+int parse_mode (const char *spec, unsigned old, int is_dir, unsigned *out);	/* 755, u+x ... */
+void ls_long_line (Out *o, const char *name, const char *native, const OsStat *st,
+                   int human);	/* for find -ls */
+const char *tool_base (const char *path);	/* last part, after '/' or '\\' */
+int tool_utf8_cols (const char *s, size_t n);	/* terminal columns */
+
+/* carch.c: deflate / inflate (RFC 1951), gzip streams, CRC-32 */
+typedef int (*SinkFn) (void *ctx, const unsigned char *p, size_t n);	/* 0 ok, -1 failed */
+typedef long (*SourceFn) (void *ctx, unsigned char *p, size_t n);	/* 0 at the end */
+typedef struct ISrc {	/* buffered input for inflate; what it reads too far goes back */
+  SourceFn fn;
+  void *ctx;
+  unsigned char buf[65536];
+  size_t pos, len;
+  int eof;
+  unsigned long long total;
+} ISrc;
+typedef struct Deflate Deflate;
+typedef struct GzOut GzOut;
+unsigned long crc32_update (unsigned long crc, const void *data, size_t n);
+Deflate *deflate_new (int level, SinkFn sink, void *ctx);
+int deflate_write (Deflate *d, const void *data, size_t n);
+int deflate_end (Deflate *d);	/* finishes and frees */
+void isrc_init (ISrc *s, SourceFn fn, void *ctx);
+long isrc_fill (ISrc *s);
+int isrc_byte (ISrc *s);	/* -1 at the end */
+int inflate_stream (ISrc *src, SinkFn sink, void *ctx);	/* 0 ok, -1 bad data, -2 sink */
+long fd_source (void *ctx, unsigned char *p, size_t n);	/* ctx: int *fd */
+int fd_sink (void *ctx, const unsigned char *p, size_t n);
+GzOut *gz_open (SinkFn sink, void *ctx, int level, const char *name, time_t mtime);
+int gz_write (void *gz, const unsigned char *p, size_t n);
+int gz_close (GzOut *g);
+int gunzip_stream (ISrc *src, SinkFn sink, void *ctx);	/* 0 ok, -1 not gzip, -2 bad, -3 write */
+
+/* the tools, registered in mbuiltin.c's table */
+int t_ls (int argc, char **argv, int in, int out, int err);
+int t_cat (int argc, char **argv, int in, int out, int err);
+int t_mkdir (int argc, char **argv, int in, int out, int err);
+int t_rmdir (int argc, char **argv, int in, int out, int err);
+int t_rm (int argc, char **argv, int in, int out, int err);
+int t_cp (int argc, char **argv, int in, int out, int err);
+int t_mv (int argc, char **argv, int in, int out, int err);
+int t_touch (int argc, char **argv, int in, int out, int err);
+int t_ln (int argc, char **argv, int in, int out, int err);
+int t_find (int argc, char **argv, int in, int out, int err);
+int t_basename (int argc, char **argv, int in, int out, int err);
+int t_dirname (int argc, char **argv, int in, int out, int err);
+int t_readlink (int argc, char **argv, int in, int out, int err);
+int t_realpath (int argc, char **argv, int in, int out, int err);
+int t_head (int argc, char **argv, int in, int out, int err);
+int t_tail (int argc, char **argv, int in, int out, int err);
+int t_tee (int argc, char **argv, int in, int out, int err);
+int t_cut (int argc, char **argv, int in, int out, int err);
+int t_sort (int argc, char **argv, int in, int out, int err);
+int t_uniq (int argc, char **argv, int in, int out, int err);
+int t_wc (int argc, char **argv, int in, int out, int err);
+int t_tr (int argc, char **argv, int in, int out, int err);
+int t_seq (int argc, char **argv, int in, int out, int err);
+int t_sleep (int argc, char **argv, int in, int out, int err);
+int t_grep (int argc, char **argv, int in, int out, int err);
+int t_egrep (int argc, char **argv, int in, int out, int err);
+int t_fgrep (int argc, char **argv, int in, int out, int err);
+int t_sed (int argc, char **argv, int in, int out, int err);
+int t_chmod (int argc, char **argv, int in, int out, int err);
+int t_du (int argc, char **argv, int in, int out, int err);
+int t_df (int argc, char **argv, int in, int out, int err);
+int t_file (int argc, char **argv, int in, int out, int err);
+int t_uname (int argc, char **argv, int in, int out, int err);
+int t_hostname (int argc, char **argv, int in, int out, int err);
+int t_whoami (int argc, char **argv, int in, int out, int err);
+int t_id (int argc, char **argv, int in, int out, int err);
+int t_ps (int argc, char **argv, int in, int out, int err);
+int t_watch (int argc, char **argv, int in, int out, int err);
+int t_cal (int argc, char **argv, int in, int out, int err);
+int t_diff (int argc, char **argv, int in, int out, int err);
+int t_gzip (int argc, char **argv, int in, int out, int err);
+int t_gunzip (int argc, char **argv, int in, int out, int err);
+int t_zcat (int argc, char **argv, int in, int out, int err);
+int t_tar (int argc, char **argv, int in, int out, int err);
+int t_zip (int argc, char **argv, int in, int out, int err);
+int t_unzip (int argc, char **argv, int in, int out, int err);
+int t_awk (int argc, char **argv, int in, int out, int err);
 
 /* }================================================================== */
 

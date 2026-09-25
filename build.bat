@@ -23,7 +23,8 @@ set CFLAGS=-std=c11 -O2 -s -Wall -Wextra -pedantic
 rem the default font: JetBrains Mono with ligatures, the Powerline and Nerd Font icons
 set FONTS=JetBrainsMonoNerdFontMono-Regular.ttf JetBrainsMonoNerdFontMono-Bold.ttf JetBrainsMonoNerdFontMono-Italic.ttf JetBrainsMonoNerdFontMono-BoldItalic.ttf JetBrainsMonoNerdFont-OFL.txt JetBrainsMonoNerdFont-README.md
 set BASE=mutil.c mpath.c mos.c
-set SRC=mmc.c mparse.c mexpand.c mpattern.c marith.c mregex.c mvar.c mexec.c mjobs.c mbuiltin.c mbvars.c mbio.c mbtest.c mline.c mcomp.c %BASE%
+set TOOLS=ctool.c cfile.c cfind.c ctext.c cgrep.c csed.c csys.c cdiff.c carch.c czip.c cawk.c
+set SRC=mmc.c mparse.c mexpand.c mpattern.c marith.c mregex.c mvar.c mexec.c mjobs.c mbuiltin.c mbvars.c mbio.c mbtest.c mline.c mcomp.c %TOOLS% %BASE%
 set CORE=tgrid.c tvt.c ttheme.c tfont.c tshape.c tdraw.c
 set TSRC=mterm.c tapp.c tpty.c twin32.c tx11.c tcocoa.c %CORE% %BASE%
 rem Windows only: the .rc files put the icon (mmc.ico) and version details in

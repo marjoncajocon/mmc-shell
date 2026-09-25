@@ -17,6 +17,16 @@ volatile int os_pending[65];
 int os_pipe_exit = 0;
 
 
+void os_proclist_free (OsProcInfo *v, size_t n) {
+  size_t i;
+  for (i = 0; i < n; i++) {
+    free(v[i].name);
+    free(v[i].cmd);
+  }
+  free(v);
+}
+
+
 #ifdef _WIN32
 
 /*
@@ -31,6 +41,8 @@ int os_pipe_exit = 0;
 #include <tlhelp32.h>
 #include <fcntl.h>
 #include <io.h>
+#include <errno.h>
+#include <psapi.h>
 #include <sys/stat.h>
 
 #ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
@@ -46,6 +58,96 @@ static int g_have_in, g_have_out;
 static UINT g_incp, g_outcp;
 static int g_umask = 022;
 static int g_int_mode = 0;	/* trap on INT: 0 default, 1 trap, 2 ignore */
+static char *narrow (const wchar_t *w);
+static int g_err = 0;	/* OS_E_... of the last failure */
+static DWORD g_winerr = 0;
+
+
+static int map_win_err (DWORD e) {
+  switch (e) {
+    case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: case ERROR_INVALID_DRIVE:
+    case ERROR_BAD_NETPATH: case ERROR_BAD_NET_NAME: case ERROR_INVALID_NAME:
+    case ERROR_BAD_PATHNAME:
+      return OS_E_NOENT;
+    case ERROR_ACCESS_DENIED: case ERROR_WRITE_PROTECT: return OS_E_ACCES;
+    case ERROR_ALREADY_EXISTS: case ERROR_FILE_EXISTS: return OS_E_EXIST;
+    case ERROR_DIR_NOT_EMPTY: return OS_E_NOTEMPTY;
+    case ERROR_DIRECTORY: return OS_E_NOTDIR;
+    case ERROR_NOT_SAME_DEVICE: return OS_E_XDEV;
+    case ERROR_SHARING_VIOLATION: case ERROR_LOCK_VIOLATION: case ERROR_BUSY:
+      return OS_E_BUSY;
+    case ERROR_DISK_FULL: case ERROR_HANDLE_DISK_FULL: return OS_E_NOSPC;
+    case ERROR_PRIVILEGE_NOT_HELD: return OS_E_PERM;
+    case ERROR_INVALID_PARAMETER: return OS_E_INVAL;
+    case ERROR_CANT_RESOLVE_FILENAME: return OS_E_LOOP;
+  }
+  return OS_E_OTHER;
+}
+
+
+/* the last Win32 call failed: remember why, return -1 */
+static int fail (void) {
+  g_winerr = GetLastError();
+  g_err = map_win_err(g_winerr);
+  return -1;
+}
+
+
+static int fail_errno (void) {
+  g_winerr = 0;
+  switch (errno) {
+    case ENOENT: g_err = OS_E_NOENT; break;
+    case EACCES: g_err = OS_E_ACCES; break;
+    case EEXIST: g_err = OS_E_EXIST; break;
+    case ENOTEMPTY: g_err = OS_E_NOTEMPTY; break;
+    case ENOTDIR: g_err = OS_E_NOTDIR; break;
+    case EISDIR: g_err = OS_E_ISDIR; break;
+    case ENOSPC: g_err = OS_E_NOSPC; break;
+    case EINVAL: g_err = OS_E_INVAL; break;
+    default: g_err = OS_E_OTHER; break;
+  }
+  return -1;
+}
+
+
+int os_errcode (void) {
+  return g_err;
+}
+
+
+const char *os_errmsg (void) {
+  static char other[256];
+  switch (g_err) {
+    case OS_E_NOENT: return "No such file or directory";
+    case OS_E_ACCES: return "Permission denied";
+    case OS_E_EXIST: return "File exists";
+    case OS_E_NOTEMPTY: return "Directory not empty";
+    case OS_E_NOTDIR: return "Not a directory";
+    case OS_E_ISDIR: return "Is a directory";
+    case OS_E_XDEV: return "Invalid cross-device link";
+    case OS_E_BUSY: return "Device or resource busy";
+    case OS_E_NOSPC: return "No space left on device";
+    case OS_E_PERM: return "Operation not permitted";
+    case OS_E_INVAL: return "Invalid argument";
+    case OS_E_LOOP: return "Too many levels of symbolic links";
+  }
+  if (g_winerr != 0) {	/* the text Windows has for it, on one line */
+    wchar_t w[200];
+    DWORD n = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                             NULL, g_winerr, 0, w, 200, NULL);
+    if (n > 0) {
+      char *t;
+      while (n > 0 && (w[n - 1] == L'\r' || w[n - 1] == L'\n' || w[n - 1] == L'.')) n--;
+      w[n] = 0;
+      t = narrow(w);
+      strncpy(other, t, sizeof(other) - 1);
+      other[sizeof(other) - 1] = '\0';
+      free(t);
+      return other;
+    }
+  }
+  return "Input/output error";
+}
 
 
 static wchar_t *widen (const char *s) {
@@ -183,6 +285,7 @@ char *os_getcwd (void) {
 int os_chdir (const char *native) {
   wchar_t *w = widen(native);
   int ok = SetCurrentDirectoryW(w) != 0;
+  if (!ok) fail();
   free(w);
   return ok ? 0 : -1;
 }
@@ -194,14 +297,54 @@ static int has_ext (const char *path, const char *ext) {
 }
 
 
+static time_t ft_time (FILETIME ft) {
+  unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+  if (t < 116444736000000000ULL) return 0;
+  return (time_t)(t / 10000000ULL - 11644473600ULL);
+}
+
+
+#define TAG_MOUNT_POINT	0xA0000003UL
+#define TAG_SYMLINK	0xA000000CUL
+
+/* a symbolic link or a junction; other reparse points (OneDrive files,
+** app aliases ...) are just files and folders */
+static int is_link_tag (const wchar_t *w) {
+  WIN32_FIND_DATAW fd;
+  HANDLE h = FindFirstFileW(w, &fd);
+  if (h == INVALID_HANDLE_VALUE) return 0;
+  FindClose(h);
+  return fd.dwReserved0 == TAG_SYMLINK || fd.dwReserved0 == TAG_MOUNT_POINT;
+}
+
+
+static void fill_common (OsStat *st, const char *native, DWORD attr, DWORD hi, DWORD lo,
+                         FILETIME wt, FILETIME at, FILETIME ct) {
+  st->exists = 1;
+  st->is_dir = (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+  st->size = st->is_dir ? 0 : (long long)(((unsigned long long)hi << 32) | lo);
+  st->blocks = (st->size + 4095) / 4096 * 8;
+  st->nlink = 1;
+  st->mtime = ft_time(wt);
+  st->atime = ft_time(at);
+  st->ctime = ft_time(ct);
+  st->mode = (attr & FILE_ATTRIBUTE_READONLY) ? 0444 : 0644;
+  if (st->is_dir || has_ext(native, ".exe") || has_ext(native, ".com") ||
+      has_ext(native, ".bat") || has_ext(native, ".cmd") || has_ext(native, ".sh"))
+    st->mode |= 0111;
+  st->uid = 1000;
+  st->gid = 1000;
+}
+
+
 static int stat_common (const char *native, OsStat *st) {
   WIN32_FILE_ATTRIBUTE_DATA d;
   wchar_t *w = widen(native);
   int ok = GetFileAttributesExW(w, GetFileExInfoStandard, &d) != 0;
-  unsigned long long t;
-  free(w);
   memset(st, 0, sizeof(*st));
   if (!ok) {
+    fail();
+    free(w);
     if (m_stricmp(native, "NUL") == 0) {	/* /dev/null */
       st->exists = 1;
       st->is_chr = 1;
@@ -210,28 +353,36 @@ static int stat_common (const char *native, OsStat *st) {
     }
     return -1;
   }
-  st->exists = 1;
-  st->is_dir = (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-  st->is_link = (d.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-  st->size = (long long)(((unsigned long long)d.nFileSizeHigh << 32) | d.nFileSizeLow);
-  t = ((unsigned long long)d.ftLastWriteTime.dwHighDateTime << 32) |
-      d.ftLastWriteTime.dwLowDateTime;
-  st->mtime = (time_t)(t / 10000000ULL - 11644473600ULL);
-  t = ((unsigned long long)d.ftLastAccessTime.dwHighDateTime << 32) |
-      d.ftLastAccessTime.dwLowDateTime;
-  st->atime = (time_t)(t / 10000000ULL - 11644473600ULL);
-  st->mode = (d.dwFileAttributes & FILE_ATTRIBUTE_READONLY) ? 0444 : 0644;
-  if (st->is_dir || has_ext(native, ".exe") || has_ext(native, ".com") ||
-      has_ext(native, ".bat") || has_ext(native, ".cmd") || has_ext(native, ".sh"))
-    st->mode |= 0111;
-  st->uid = 1000;
-  st->gid = 1000;
+  fill_common(st, native, d.dwFileAttributes, d.nFileSizeHigh, d.nFileSizeLow,
+              d.ftLastWriteTime, d.ftLastAccessTime, d.ftCreationTime);
+  st->is_link = (d.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 && is_link_tag(w);
+  if (st->is_link) st->mode |= 0777;
+  free(w);
   return 0;
 }
 
 
 int os_stat (const char *native, OsStat *st) {
   int r = stat_common(native, st);
+  if (r == 0 && st->is_link) {	/* what the link points to */
+    wchar_t *w = widen(native);
+    HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    BY_HANDLE_FILE_INFORMATION fi;
+    free(w);
+    if (h == INVALID_HANDLE_VALUE) {	/* a dangling link */
+      fail();
+      memset(st, 0, sizeof(*st));
+      return -1;
+    }
+    if (GetFileInformationByHandle(h, &fi)) {
+      memset(st, 0, sizeof(*st));
+      fill_common(st, native, fi.dwFileAttributes, fi.nFileSizeHigh, fi.nFileSizeLow,
+                  fi.ftLastWriteTime, fi.ftLastAccessTime, fi.ftCreationTime);
+      st->nlink = fi.nNumberOfLinks;
+    }
+    CloseHandle(h);
+  }
   st->is_link = 0;
   return r;
 }
@@ -276,7 +427,7 @@ int os_listdir (const char *native, Vec *out) {
   HANDLE h = FindFirstFileW(w, &fd);
   free(pat);
   free(w);
-  if (h == INVALID_HANDLE_VALUE) return -1;
+  if (h == INVALID_HANDLE_VALUE) return fail();
   do {
     if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
       continue;
@@ -290,6 +441,7 @@ int os_listdir (const char *native, Vec *out) {
 int os_mkdir (const char *native) {
   wchar_t *w = widen(native);
   int ok = CreateDirectoryW(w, NULL) != 0;
+  if (!ok) fail();
   free(w);
   return ok ? 0 : -1;
 }
@@ -298,6 +450,7 @@ int os_mkdir (const char *native) {
 int os_unlink (const char *native) {
   wchar_t *w = widen(native);
   int ok = DeleteFileW(w) != 0;
+  if (!ok) fail();
   free(w);
   return ok ? 0 : -1;
 }
@@ -322,6 +475,13 @@ int os_open (const char *native, int mode) {
   else if (mode == OS_EXCL) flags |= _O_WRONLY | _O_CREAT | _O_EXCL;
   else flags |= _O_WRONLY | _O_CREAT;
   fd = _wopen(w, flags, _S_IREAD | _S_IWRITE);
+  if (fd < 0) {
+    fail_errno();
+    if (g_err == OS_E_ACCES) {	/* a folder, or really no permission? */
+      DWORD a = GetFileAttributesW(w);
+      if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) g_err = OS_E_ISDIR;
+    }
+  }
   free(w);
   /* we write with WriteFile, so do the "append" part ourselves */
   if (fd >= 0 && mode == OS_APPEND) _lseeki64(fd, 0, SEEK_END);
@@ -522,6 +682,7 @@ long os_getppid (void) {
 
 
 long os_getuid (void) { return 1000; }
+long os_getgid (void) { return 1000; }
 long os_geteuid (void) { return 1000; }
 
 
@@ -890,6 +1051,362 @@ void os_thread_join (OsThread *t) {
   free(t);
 }
 
+/* }================================================================== */
+
+
+/*
+** {==================================================================
+** Windows: for the tools (cp, rm, ls -l, df, ps ...)
+** ===================================================================
+*/
+
+int os_rmdir (const char *native) {
+  wchar_t *w = widen(native);
+  int ok = RemoveDirectoryW(w) != 0;
+  if (!ok) {
+    fail();
+    if (g_winerr == ERROR_DIRECTORY) g_err = OS_E_NOTDIR;
+  }
+  free(w);
+  return ok ? 0 : -1;
+}
+
+
+int os_rename (const char *from, const char *to) {
+  wchar_t *a = widen(from), *b = widen(to);
+  int ok = MoveFileExW(a, b, MOVEFILE_REPLACE_EXISTING) != 0;
+  if (!ok) fail();
+  free(a);
+  free(b);
+  return ok ? 0 : -1;
+}
+
+
+int os_chmod (const char *native, unsigned mode) {
+  wchar_t *w = widen(native);
+  DWORD a = GetFileAttributesW(w);
+  int ok = 1;
+  if (a == INVALID_FILE_ATTRIBUTES) ok = 0;
+  else if (!(a & FILE_ATTRIBUTE_DIRECTORY)) {
+    DWORD na = (mode & 0200) ? (a & ~(DWORD)FILE_ATTRIBUTE_READONLY) : (a | FILE_ATTRIBUTE_READONLY);
+    if (na == 0) na = FILE_ATTRIBUTE_NORMAL;
+    if (na != a) ok = SetFileAttributesW(w, na) != 0;
+  }
+  if (!ok) fail();
+  free(w);
+  return ok ? 0 : -1;
+}
+
+
+static FILETIME to_ft (time_t t) {
+  unsigned long long v = ((unsigned long long)t + 11644473600ULL) * 10000000ULL;
+  FILETIME ft;
+  ft.dwLowDateTime = (DWORD)v;
+  ft.dwHighDateTime = (DWORD)(v >> 32);
+  return ft;
+}
+
+
+int os_utime (const char *native, time_t atime, time_t mtime) {
+  wchar_t *w = widen(native);
+  HANDLE h = CreateFileW(w, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE |
+                         FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  FILETIME a = to_ft(atime), m = to_ft(mtime);
+  int ok;
+  free(w);
+  if (h == INVALID_HANDLE_VALUE) return fail();
+  ok = SetFileTime(h, NULL, &a, &m) != 0;
+  if (!ok) fail();
+  CloseHandle(h);
+  return ok ? 0 : -1;
+}
+
+
+int os_symlink (const char *target, const char *native, int is_dir) {
+  wchar_t *t, *w = widen(native);
+  char *tt = xstrdup(target), *p;
+  int ok;
+  for (p = tt; *p; p++)
+    if (*p == '/') *p = '\\';
+  t = widen(tt);
+  /* 2: SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE (Developer Mode) */
+  ok = CreateSymbolicLinkW(w, t, (is_dir ? 1 : 0) | 2) != 0;
+  if (!ok && GetLastError() == ERROR_INVALID_PARAMETER)	/* older Windows 10 */
+    ok = CreateSymbolicLinkW(w, t, is_dir ? 1 : 0) != 0;
+  if (!ok) fail();
+  free(tt);
+  free(t);
+  free(w);
+  return ok ? 0 : -1;
+}
+
+
+int os_link (const char *from, const char *to) {
+  wchar_t *a = widen(from), *b = widen(to);
+  int ok = CreateHardLinkW(b, a, NULL) != 0;
+  if (!ok) fail();
+  free(a);
+  free(b);
+  return ok ? 0 : -1;
+}
+
+
+char *os_readlink (const char *native) {
+  wchar_t *w = widen(native);
+  HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                         NULL);
+  unsigned char buf[16384];
+  DWORD got = 0, tag;
+  const unsigned char *pb;
+  unsigned short sub_off, sub_len, pr_off, pr_len;
+  wchar_t *name;
+  size_t n;
+  char *r, *p;
+  free(w);
+  if (h == INVALID_HANDLE_VALUE) {
+    fail();
+    return NULL;
+  }
+  if (!DeviceIoControl(h, 0x000900A8 /* FSCTL_GET_REPARSE_POINT */, NULL, 0, buf,
+                       sizeof(buf), &got, NULL) || got < 16) {
+    fail();
+    CloseHandle(h);
+    g_err = OS_E_INVAL;
+    return NULL;
+  }
+  CloseHandle(h);
+  memcpy(&tag, buf, 4);
+  memcpy(&sub_off, buf + 8, 2);
+  memcpy(&sub_len, buf + 10, 2);
+  memcpy(&pr_off, buf + 12, 2);
+  memcpy(&pr_len, buf + 14, 2);
+  if (tag == TAG_SYMLINK) pb = buf + 20;
+  else if (tag == TAG_MOUNT_POINT) pb = buf + 16;
+  else {
+    g_err = OS_E_INVAL;
+    return NULL;
+  }
+  if (pr_len == 0) {	/* no print name: the substitute one, without \??\ */
+    pr_off = sub_off;
+    pr_len = sub_len;
+  }
+  if ((size_t)(pb - buf) + pr_off + pr_len > got) {
+    g_err = OS_E_INVAL;
+    return NULL;
+  }
+  n = pr_len / 2;
+  name = (wchar_t *)xmalloc((n + 1) * sizeof(wchar_t));
+  memcpy(name, pb + pr_off, n * sizeof(wchar_t));
+  name[n] = 0;
+  r = narrow(name);
+  free(name);
+  if (strncmp(r, "\\??\\", 4) == 0) memmove(r, r + 4, strlen(r + 4) + 1);
+  if (tag == TAG_SYMLINK && strchr(r, ':') == NULL)	/* relative: Linux style */
+    for (p = r; *p; p++)
+      if (*p == '\\') *p = '/';
+  return r;
+}
+
+
+static int file_id (const char *native, DWORD *vol, DWORD *hi, DWORD *lo) {
+  wchar_t *w = widen(native);
+  HANDLE h = CreateFileW(w, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  BY_HANDLE_FILE_INFORMATION fi;
+  int ok;
+  free(w);
+  if (h == INVALID_HANDLE_VALUE) return -1;
+  ok = GetFileInformationByHandle(h, &fi) != 0;
+  CloseHandle(h);
+  if (!ok) return -1;
+  *vol = fi.dwVolumeSerialNumber;
+  *hi = fi.nFileIndexHigh;
+  *lo = fi.nFileIndexLow;
+  return 0;
+}
+
+
+int os_same_file (const char *a, const char *b) {
+  DWORD v1, h1, l1, v2, h2, l2;
+  if (file_id(a, &v1, &h1, &l1) != 0 || file_id(b, &v2, &h2, &l2) != 0) return 0;
+  return v1 == v2 && h1 == h2 && l1 == l2;
+}
+
+
+long long os_seek (int fd, long long off, int whence) {
+  long long r;
+  if (GetFileType((HANDLE)_get_osfhandle(fd)) != FILE_TYPE_DISK) {	/* pipes "seek" too */
+    g_err = OS_E_INVAL;
+    g_winerr = 0;
+    return -1;
+  }
+  r = _lseeki64(fd, off, whence == 0 ? SEEK_SET : whence == 1 ? SEEK_CUR : SEEK_END);
+  if (r < 0) fail_errno();
+  return r;
+}
+
+
+void os_sleep_ms (int ms) {
+  Sleep((DWORD)(ms > 0 ? ms : 0));
+}
+
+
+int os_diskfree (const char *native, unsigned long long *total,
+                 unsigned long long *avail, unsigned long long *free_) {
+  ULARGE_INTEGER a, t, f;
+  wchar_t *w = widen(native);
+  int ok = GetDiskFreeSpaceExW(w, &a, &t, &f) != 0;
+  free(w);
+  if (!ok) return fail();
+  *total = t.QuadPart;
+  *avail = a.QuadPart;
+  *free_ = f.QuadPart;
+  return 0;
+}
+
+
+void os_mounts (Vec *out) {
+  wchar_t drives[512], *d;
+  DWORD n = GetLogicalDriveStringsW(511, drives);
+  if (n == 0 || n > 511) return;
+  for (d = drives; *d; d += wcslen(d) + 1) {
+    UINT type = GetDriveTypeW(d);
+    wchar_t fs[64];
+    char *root, *fsn, *line;
+    if (type == DRIVE_NO_ROOT_DIR || type == DRIVE_UNKNOWN) continue;
+    fs[0] = 0;
+    if (!GetVolumeInformationW(d, NULL, 0, NULL, NULL, NULL, fs, 64)) continue;
+    root = narrow(d);
+    fsn = narrow(fs);
+    line = (char *)xmalloc(strlen(root) * 2 + strlen(fsn) + 4);
+    sprintf(line, "%.2s\t%s\t%s", root, root, fsn);
+    vec_push(out, line);
+    free(root);
+    free(fsn);
+  }
+}
+
+
+void os_uname (OsUname *u) {
+  typedef LONG (WINAPI *RtlGetVersionFn) (OSVERSIONINFOW *);
+  OSVERSIONINFOW vi;
+  RtlGetVersionFn fn = (RtlGetVersionFn)(void (*) (void))GetProcAddress(
+                         GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
+  memset(u, 0, sizeof(*u));
+  memset(&vi, 0, sizeof(vi));
+  vi.dwOSVersionInfoSize = sizeof(vi);
+  if (fn == NULL || fn(&vi) != 0) {
+    vi.dwMajorVersion = 10;
+    vi.dwMinorVersion = 0;
+  }
+  /* git-bash says MINGW64_NT-10.0-26200: scripts look for MINGW* / MSYS* */
+  snprintf(u->sysname, sizeof(u->sysname), "MINGW64_NT-%lu.%lu-%lu",
+           (unsigned long)vi.dwMajorVersion, (unsigned long)vi.dwMinorVersion,
+           (unsigned long)vi.dwBuildNumber);
+  snprintf(u->release, sizeof(u->release), "%lu.%lu.%lu", (unsigned long)vi.dwMajorVersion,
+           (unsigned long)vi.dwMinorVersion, (unsigned long)vi.dwBuildNumber);
+  snprintf(u->version, sizeof(u->version), "Windows %s build %lu",
+           vi.dwBuildNumber >= 22000 ? "11" : vi.dwMajorVersion >= 10 ? "10" : "NT",
+           (unsigned long)vi.dwBuildNumber);
+  snprintf(u->machine, sizeof(u->machine), "%s", os_machine());
+  snprintf(u->os, sizeof(u->os), "Msys");
+}
+
+
+int os_proclist (OsProcInfo **out, size_t *count) {
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  PROCESSENTRY32W pe;
+  OsProcInfo *v = NULL;
+  size_t n = 0, cap = 0;
+  *out = NULL;
+  *count = 0;
+  if (snap == INVALID_HANDLE_VALUE) return fail();
+  pe.dwSize = sizeof(pe);
+  if (Process32FirstW(snap, &pe)) {
+    do {
+      OsProcInfo *p;
+      HANDLE h;
+      if (n == cap) {
+        cap = cap ? cap * 2 : 128;
+        v = (OsProcInfo *)xrealloc(v, cap * sizeof(OsProcInfo));
+      }
+      p = &v[n++];
+      memset(p, 0, sizeof(*p));
+      p->pid = (long)pe.th32ProcessID;
+      p->ppid = (long)pe.th32ParentProcessID;
+      p->uid = 1000;
+      p->state = 'S';
+      p->name = narrow(pe.szExeFile);
+      h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+      if (h != NULL) {
+        FILETIME c, e, k, us;
+        PROCESS_MEMORY_COUNTERS pm;
+        wchar_t path[1024];
+        DWORD len = 1024;
+        if (GetProcessTimes(h, &c, &e, &k, &us)) {
+          p->cpu = ft_seconds(k) + ft_seconds(us);
+          p->start = ft_time(c);
+        }
+        memset(&pm, 0, sizeof(pm));
+        pm.cb = sizeof(pm);
+        if (GetProcessMemoryInfo(h, &pm, sizeof(pm))) {
+          p->rss = (long long)pm.WorkingSetSize;
+          p->vsz = (long long)pm.PagefileUsage;
+        }
+        if (QueryFullProcessImageNameW(h, 0, path, &len)) p->cmd = narrow(path);
+        CloseHandle(h);
+      }
+      else p->uid = 0;	/* not ours to look at: the system's */
+      if (p->cmd == NULL) p->cmd = xstrdup(p->name);
+    } while (Process32NextW(snap, &pe));
+  }
+  CloseHandle(snap);
+  *out = v;
+  *count = n;
+  return 0;
+}
+
+
+unsigned long long os_memtotal (void) {
+  MEMORYSTATUSEX m;
+  m.dwLength = sizeof(m);
+  if (!GlobalMemoryStatusEx(&m)) return 0;
+  return m.ullTotalPhys;
+}
+
+
+char *os_user_name (long uid) {
+  char num[24];
+  if (uid == 1000) return os_username();
+  if (uid == 0) return xstrdup("SYSTEM");
+  return xstrdup(ll_to_str(uid, num));
+}
+
+
+char *os_group_name (long gid) {
+  char num[24];
+  if (gid == 1000) return xstrdup("None");
+  return xstrdup(ll_to_str(gid, num));
+}
+
+
+int os_is_system_program (const char *native) {
+  char *root = os_getenv("SystemRoot");
+  size_t n;
+  int r;
+  if (root == NULL || root[0] == '\0') {
+    free(root);
+    root = xstrdup("C:\\Windows");
+  }
+  n = strlen(root);
+  r = m_strnicmp(native, root, n) == 0 && (native[n] == '\\' || native[n] == '/');
+  free(root);
+  return r;
+}
+
+/* }================================================================== */
+
 
 #else
 
@@ -906,13 +1423,21 @@ void os_thread_join (OsThread *t) {
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <grp.h>
+#include <pwd.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/time.h>
 #include <sys/times.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <sys/mount.h>
+#include <sys/sysctl.h>
+#endif
 
 /* job control, see below */
 static int g_jobctl;
@@ -1019,6 +1544,9 @@ static void fill_stat (OsStat *st, const struct stat *s) {
   st->size = (long long)s->st_size;
   st->mtime = s->st_mtime;
   st->atime = s->st_atime;
+  st->ctime = s->st_ctime;
+  st->blocks = (long long)s->st_blocks;
+  st->nlink = (unsigned long)s->st_nlink;
   st->dev = (unsigned long long)s->st_dev;
   st->ino = (unsigned long long)s->st_ino;
   st->uid = (long)s->st_uid;
@@ -1261,6 +1789,7 @@ char *os_username (void) {
 long os_getpid (void) { return (long)getpid(); }
 long os_getppid (void) { return (long)getppid(); }
 long os_getuid (void) { return (long)getuid(); }
+long os_getgid (void) { return (long)getgid(); }
 long os_geteuid (void) { return (long)geteuid(); }
 
 
@@ -1676,6 +2205,360 @@ void os_npipe_end (OsNPipe *np) {
   }
   else os_thread_join(np->th);
   npipe_unref(np);
+}
+
+/* }================================================================== */
+
+
+/*
+** {==================================================================
+** POSIX: for the tools (cp, rm, ls -l, df, ps ...)
+** ===================================================================
+*/
+
+int os_errcode (void) {
+  switch (errno) {
+    case ENOENT: return OS_E_NOENT;
+    case EACCES: return OS_E_ACCES;
+    case EEXIST: return OS_E_EXIST;
+    case ENOTEMPTY: return OS_E_NOTEMPTY;
+    case ENOTDIR: return OS_E_NOTDIR;
+    case EISDIR: return OS_E_ISDIR;
+    case EXDEV: return OS_E_XDEV;
+    case EBUSY: return OS_E_BUSY;
+    case ENOSPC: return OS_E_NOSPC;
+    case EPERM: return OS_E_PERM;
+    case EINVAL: return OS_E_INVAL;
+    case ELOOP: return OS_E_LOOP;
+  }
+  return OS_E_OTHER;
+}
+
+
+const char *os_errmsg (void) {
+  return strerror(errno);
+}
+
+
+int os_rmdir (const char *native) { return rmdir(native); }
+int os_rename (const char *from, const char *to) { return rename(from, to); }
+int os_chmod (const char *native, unsigned mode) { return chmod(native, (mode_t)mode); }
+int os_link (const char *from, const char *to) { return link(from, to); }
+
+
+int os_utime (const char *native, time_t atime, time_t mtime) {
+  struct timeval tv[2];
+  tv[0].tv_sec = atime;
+  tv[0].tv_usec = 0;
+  tv[1].tv_sec = mtime;
+  tv[1].tv_usec = 0;
+  return utimes(native, tv);
+}
+
+
+int os_symlink (const char *target, const char *native, int is_dir) {
+  (void)is_dir;
+  return symlink(target, native);
+}
+
+
+char *os_readlink (const char *native) {
+  size_t cap = 256;
+  for (;;) {
+    char *b = (char *)xmalloc(cap);
+    ssize_t n = readlink(native, b, cap);
+    if (n < 0) {
+      int e = errno;
+      free(b);
+      errno = e;
+      return NULL;
+    }
+    if ((size_t)n < cap) {
+      b[n] = '\0';
+      return b;
+    }
+    free(b);
+    cap *= 2;
+  }
+}
+
+
+int os_same_file (const char *a, const char *b) {
+  struct stat x, y;
+  if (stat(a, &x) != 0 || stat(b, &y) != 0) return 0;
+  return x.st_dev == y.st_dev && x.st_ino == y.st_ino;
+}
+
+
+long long os_seek (int fd, long long off, int whence) {
+  return (long long)lseek(fd, (off_t)off, whence == 0 ? SEEK_SET : whence == 1 ? SEEK_CUR : SEEK_END);
+}
+
+
+void os_sleep_ms (int ms) {
+  struct timespec ts;
+  if (ms <= 0) return;
+  ts.tv_sec = ms / 1000;
+  ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+  nanosleep(&ts, NULL);
+}
+
+
+int os_diskfree (const char *native, unsigned long long *total,
+                 unsigned long long *avail, unsigned long long *free_) {
+  struct statvfs v;
+  unsigned long long bs;
+  if (statvfs(native, &v) != 0) return -1;
+  bs = v.f_frsize ? (unsigned long long)v.f_frsize : (unsigned long long)v.f_bsize;
+  *total = (unsigned long long)v.f_blocks * bs;
+  *avail = (unsigned long long)v.f_bavail * bs;
+  *free_ = (unsigned long long)v.f_bfree * bs;
+  return 0;
+}
+
+
+void os_mounts (Vec *out) {
+#ifdef __APPLE__
+  struct statfs *m;
+  int i, n = getmntinfo(&m, MNT_NOWAIT);
+  for (i = 0; i < n; i++) {
+    Buf b;
+    buf_init(&b);
+    buf_printf(&b, "%s\t%s\t%s", m[i].f_mntfromname, m[i].f_mntonname, m[i].f_fstypename);
+    vec_push(out, buf_take(&b));
+  }
+#else
+  size_t len;
+  char *text = read_file("/proc/mounts", &len), *line, *next;
+  if (text == NULL) return;
+  for (line = text; line && *line; line = next) {
+    char dev[512], dir[512], type[64];
+    next = strchr(line, '\n');
+    if (next) *next++ = '\0';
+    if (sscanf(line, "%511s %511s %63s", dev, dir, type) == 3) {
+      Buf b;
+      char *p, *q;
+      for (p = q = dir; *p; p++) {	/* \040 is a space */
+        if (p[0] == '\\' && p[1] >= '0' && p[1] <= '3' && p[2] && p[3]) {
+          *q++ = (char)(((p[1] - '0') << 6) | ((p[2] - '0') << 3) | (p[3] - '0'));
+          p += 3;
+        }
+        else *q++ = *p;
+      }
+      *q = '\0';
+      buf_init(&b);
+      buf_printf(&b, "%s\t%s\t%s", dev, dir, type);
+      vec_push(out, buf_take(&b));
+    }
+  }
+  free(text);
+#endif
+}
+
+
+void os_uname (OsUname *u) {
+  struct utsname n;
+  memset(u, 0, sizeof(*u));
+  if (uname(&n) == 0) {
+    snprintf(u->sysname, sizeof(u->sysname), "%s", n.sysname);
+    snprintf(u->release, sizeof(u->release), "%s", n.release);
+    snprintf(u->version, sizeof(u->version), "%s", n.version);
+    snprintf(u->machine, sizeof(u->machine), "%s", n.machine);
+  }
+#if defined(__ANDROID__)
+  snprintf(u->os, sizeof(u->os), "Android");
+#elif defined(__APPLE__)
+  snprintf(u->os, sizeof(u->os), "Darwin");
+#else
+  snprintf(u->os, sizeof(u->os), "GNU/Linux");
+#endif
+}
+
+
+#ifdef __APPLE__
+
+int os_proclist (OsProcInfo **out, size_t *count) {
+  int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
+  size_t size = 0, n, i;
+  struct kinfo_proc *kp;
+  OsProcInfo *v;
+  int argmax_mib[2] = {CTL_KERN, KERN_ARGMAX}, argmax = 0;
+  size_t am = sizeof(argmax);
+  *out = NULL;
+  *count = 0;
+  if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0) return -1;
+  size += size / 8;
+  kp = (struct kinfo_proc *)xmalloc(size);
+  if (sysctl(mib, 4, kp, &size, NULL, 0) != 0) {
+    free(kp);
+    return -1;
+  }
+  sysctl(argmax_mib, 2, &argmax, &am, NULL, 0);
+  n = size / sizeof(struct kinfo_proc);
+  v = (OsProcInfo *)xmalloc((n ? n : 1) * sizeof(OsProcInfo));
+  for (i = 0; i < n; i++) {
+    OsProcInfo *p = &v[i];
+    static const char states[] = "?IRSTZ";	/* SIDL SRUN SSLEEP SSTOP SZOMB */
+    int st = kp[i].kp_proc.p_stat;
+    memset(p, 0, sizeof(*p));
+    p->pid = (long)kp[i].kp_proc.p_pid;
+    p->ppid = (long)kp[i].kp_eproc.e_ppid;
+    p->uid = (long)kp[i].kp_eproc.e_ucred.cr_uid;
+    p->start = kp[i].kp_proc.p_starttime.tv_sec;
+    p->state = (st >= 0 && st <= 5) ? states[st] : '?';
+    p->name = xstrdup(kp[i].kp_proc.p_comm);
+    if (argmax > 0) {	/* argc, the program path, then argv */
+      int amib[3] = {CTL_KERN, KERN_PROCARGS2, 0};
+      char *buf = (char *)xmalloc((size_t)argmax);
+      size_t len = (size_t)argmax;
+      amib[2] = (int)p->pid;
+      if (sysctl(amib, 3, buf, &len, NULL, 0) == 0 && len > sizeof(int)) {
+        int argc, k;
+        char *q = buf + sizeof(int), *end = buf + len;
+        Buf b;
+        memcpy(&argc, buf, sizeof(int));
+        q += strnlen(q, (size_t)(end - q));
+        while (q < end && *q == '\0') q++;
+        buf_init(&b);
+        for (k = 0; k < argc && q < end; k++) {
+          size_t l = strnlen(q, (size_t)(end - q));
+          if (k) buf_putc(&b, ' ');
+          buf_putn(&b, q, l);
+          q += l + 1;
+        }
+        if (b.len > 0) p->cmd = buf_take(&b);
+        else buf_free(&b);
+      }
+      free(buf);
+    }
+    if (p->cmd == NULL) p->cmd = xstrdup(p->name);
+  }
+  free(kp);
+  *out = v;
+  *count = n;
+  return 0;
+}
+
+
+unsigned long long os_memtotal (void) {
+  int mib[2] = {CTL_HW, HW_MEMSIZE};
+  unsigned long long m = 0;
+  size_t len = sizeof(m);
+  if (sysctl(mib, 2, &m, &len, NULL, 0) != 0) return 0;
+  return m;
+}
+
+#else
+
+int os_proclist (OsProcInfo **out, size_t *count) {
+  Vec names;
+  size_t i, n = 0, len;
+  OsProcInfo *v;
+  long tick = sysconf(_SC_CLK_TCK), page = sysconf(_SC_PAGESIZE);
+  time_t boot = 0;
+  char *text;
+  *out = NULL;
+  *count = 0;
+  if (tick <= 0) tick = 100;
+  if ((text = read_file("/proc/stat", &len)) != NULL) {
+    char *b = strstr(text, "\nbtime ");
+    if (b) boot = (time_t)strtoll(b + 7, NULL, 10);
+    free(text);
+  }
+  vec_init(&names);
+  if (os_listdir("/proc", &names) != 0) {
+    vec_free(&names);
+    return -1;
+  }
+  v = (OsProcInfo *)xmalloc((names.n ? names.n : 1) * sizeof(OsProcInfo));
+  for (i = 0; i < names.n; i++) {
+    char path[64], *s, *rp;
+    OsProcInfo *p;
+    long long f[40];
+    int k;
+    if (strspn(names.v[i], "0123456789") != strlen(names.v[i])) continue;
+    snprintf(path, sizeof(path), "/proc/%s/stat", names.v[i]);
+    if ((s = read_file(path, &len)) == NULL) continue;
+    rp = strrchr(s, ')');
+    if (rp == NULL || strchr(s, '(') == NULL) {
+      free(s);
+      continue;
+    }
+    p = &v[n++];
+    memset(p, 0, sizeof(*p));
+    p->pid = atol(names.v[i]);
+    *rp = '\0';
+    p->name = xstrdup(strchr(s, '(') + 1);
+    rp += 2;
+    p->state = *rp ? *rp : '?';
+    memset(f, 0, sizeof(f));
+    /* fields from 4 on: ppid pgrp session tty tpgid flags minflt cminflt
+    ** majflt cmajflt utime stime cutime cstime priority nice threads
+    ** itreal starttime vsize rss */
+    for (k = 4, rp += 1; k < 40 && *rp; k++) {
+      f[k] = strtoll(rp, &rp, 10);
+    }
+    p->ppid = (long)f[4];
+    p->cpu = (double)(f[14] + f[15]) / (double)tick;
+    p->start = boot + (time_t)(f[22] / tick);
+    p->vsz = f[23];
+    p->rss = f[24] * page;
+    free(s);
+    snprintf(path, sizeof(path), "/proc/%s/status", names.v[i]);
+    if ((s = read_file(path, &len)) != NULL) {
+      char *u = strstr(s, "\nUid:");
+      if (u) p->uid = strtol(u + 5, NULL, 10);
+      free(s);
+    }
+    snprintf(path, sizeof(path), "/proc/%s/cmdline", names.v[i]);
+    if ((s = read_file(path, &len)) != NULL && len > 0) {
+      size_t j;
+      while (len > 0 && s[len - 1] == '\0') len--;
+      for (j = 0; j < len; j++)
+        if (s[j] == '\0') s[j] = ' ';
+      s[len] = '\0';
+      p->cmd = s;
+    }
+    else {
+      free(s);
+      p->cmd = xstrcat3("[", p->name, "]");
+    }
+  }
+  vec_free(&names);
+  *out = v;
+  *count = n;
+  return 0;
+}
+
+
+unsigned long long os_memtotal (void) {
+  long pages = sysconf(_SC_PHYS_PAGES), page = sysconf(_SC_PAGESIZE);
+  if (pages <= 0 || page <= 0) return 0;
+  return (unsigned long long)pages * (unsigned long long)page;
+}
+
+#endif
+
+
+char *os_user_name (long uid) {
+  struct passwd *pw = getpwuid((uid_t)uid);
+  char num[24];
+  if (pw && pw->pw_name) return xstrdup(pw->pw_name);
+  return xstrdup(ll_to_str(uid, num));
+}
+
+
+char *os_group_name (long gid) {
+  struct group *gr = getgrgid((gid_t)gid);
+  char num[24];
+  if (gr && gr->gr_name) return xstrdup(gr->gr_name);
+  return xstrdup(ll_to_str(gid, num));
+}
+
+
+int os_is_system_program (const char *native) {
+  (void)native;
+  return 0;
 }
 
 /* }================================================================== */

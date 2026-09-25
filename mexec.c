@@ -447,6 +447,15 @@ char *sh_find_command (const char *name) {
     }
   }
   found = search_path(name);
+  /* Windows' own find.exe, sort.exe ... are not the Linux ones: our
+  ** fallback of that name wins over them (find.exe still reaches them) */
+  if (found != NULL && os_is_system_program(found)) {
+    const Builtin *b = builtin_find(name, 1);
+    if (b != NULL && (b->flags & B_WINSYS)) {
+      free(found);
+      return NULL;
+    }
+  }
   if (found != NULL && O("hashall")) {
     hash_put(name, found);
     hash_get(name)->hits = 1;
@@ -2012,6 +2021,12 @@ static int run_argv (Vec *argv, char **assigns, int nassigns, int flags) {
     return status;
   }
   if (flags & EX_BUILTIN_ONLY) {
+    if ((b = builtin_find(name, 1)) != NULL) {	/* builtin grep: ours, not the program */
+      if (temp_assign(assigns, n, saved, 1) != 0) return 1;	/* tools see them exported, like programs */
+      status = b->fn((int)argv->n, argv->v, sh_fd[0], sh_fd[1], sh_fd[2]);
+      temp_restore(saved, n);
+      return status;
+    }
     sh_error("builtin: %s: not a shell builtin", name);
     return 1;
   }
@@ -2019,8 +2034,8 @@ static int run_argv (Vec *argv, char **assigns, int nassigns, int flags) {
   if (exe == NULL) {
     OsStat st;
     char *native;
-    if ((b = builtin_find(name, 1)) != NULL) {	/* fallbacks: ls, cat ... */
-      if (temp_assign(assigns, n, saved, 0) != 0) return 1;
+    if ((b = builtin_fallback(name)) != NULL) {	/* fallbacks: ls, cat ... */
+      if (temp_assign(assigns, n, saved, 1) != 0) return 1;	/* exported, as for a program */
       status = b->fn((int)argv->n, argv->v, sh_fd[0], sh_fd[1], sh_fd[2]);
       temp_restore(saved, n);
       return status;
@@ -2418,8 +2433,11 @@ static int exec_pipeline (Node *pn) {
       }
       if (s->external) spawn_program_stage(s);
       else if (i < n - 1) {
+        /* a real builtin runs here; a tool (grep, sort ...) in a child
+        ** mmc, so it streams like the program it stands for */
         int builtin_only = s->n->type == N_SIMPLE && s->argv.n > 0 &&
-                           func_find(s->argv.v[0]) == NULL;
+                           func_find(s->argv.v[0]) == NULL &&
+                           builtin_find(s->argv.v[0], 0) != NULL;
         if (!builtin_only) {
           if (spawn_stage(s->n->src ? s->n->src : "", s->in, s->out, s->err,
                           &s->proc, &s->pid) == 0)
