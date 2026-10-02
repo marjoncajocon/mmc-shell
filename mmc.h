@@ -247,6 +247,25 @@ char *os_user_name (long uid);	/* malloc'd; the number if unknown */
 char *os_group_name (long gid);
 int os_is_system_program (const char *native);	/* Windows: under %SystemRoot% */
 
+/* for stat, date, nproc, truncate, sync, tty, timeout, xargs (cinfo.c) */
+typedef struct OsStatX {
+  long atime_ns, mtime_ns, ctime_ns, btime_ns;	/* the part below the second */
+  time_t btime;	/* birth, when has_btime */
+  int has_btime;
+  unsigned long blksize;	/* "IO Block" */
+  unsigned long block_unit;	/* what st.blocks counts: 512 (Windows: 1024, like git-bash) */
+  unsigned long dev_major, dev_minor, rdev_major, rdev_minor;
+} OsStatX;
+int os_stat_x (const char *native, int follow, OsStat *st, OsStatX *x);	/* os_stat / os_lstat, more exact */
+int os_localzone (time_t t, long *gmtoff, int *isdst, char *zone, size_t n);	/* TZ unset: the system's zone */
+int os_nproc (int all);	/* processors: online, or all */
+long os_arg_max (void);	/* the longest command line a program can get */
+int os_ftruncate (int fd, long long size);
+int os_fsync (int fd);
+void os_sync (void);
+char *os_ttyname (int fd);	/* malloc'd; NULL: not a terminal */
+int os_kill_tree (long pid, int sig);	/* the process and (Windows) what it started */
+
 /* }================================================================== */
 
 
@@ -860,6 +879,48 @@ int t_tar (int argc, char **argv, int in, int out, int err);
 int t_zip (int argc, char **argv, int in, int out, int err);
 int t_unzip (int argc, char **argv, int in, int out, int err);
 int t_awk (int argc, char **argv, int in, int out, int err);
+int t_md5sum (int argc, char **argv, int in, int out, int err);
+int t_sha1sum (int argc, char **argv, int in, int out, int err);
+int t_sha224sum (int argc, char **argv, int in, int out, int err);
+int t_sha256sum (int argc, char **argv, int in, int out, int err);
+int t_sha384sum (int argc, char **argv, int in, int out, int err);
+int t_sha512sum (int argc, char **argv, int in, int out, int err);
+int t_cksum (int argc, char **argv, int in, int out, int err);
+int t_sum (int argc, char **argv, int in, int out, int err);
+int t_base64 (int argc, char **argv, int in, int out, int err);
+int t_base32 (int argc, char **argv, int in, int out, int err);
+int t_stat (int argc, char **argv, int in, int out, int err);
+int t_date (int argc, char **argv, int in, int out, int err);
+int t_nproc (int argc, char **argv, int in, int out, int err);
+int t_printenv (int argc, char **argv, int in, int out, int err);
+int t_tty (int argc, char **argv, int in, int out, int err);
+int t_mktemp (int argc, char **argv, int in, int out, int err);
+int t_truncate (int argc, char **argv, int in, int out, int err);
+int t_yes (int argc, char **argv, int in, int out, int err);
+int t_expr (int argc, char **argv, int in, int out, int err);
+int t_sync (int argc, char **argv, int in, int out, int err);
+int t_nohup (int argc, char **argv, int in, int out, int err);
+int t_timeout (int argc, char **argv, int in, int out, int err);
+int t_xargs (int argc, char **argv, int in, int out, int err);
+int t_cygpath (int argc, char **argv, int in, int out, int err);
+int t_tac (int argc, char **argv, int in, int out, int err);
+int t_rev (int argc, char **argv, int in, int out, int err);
+int t_nl (int argc, char **argv, int in, int out, int err);
+int t_paste (int argc, char **argv, int in, int out, int err);
+int t_comm (int argc, char **argv, int in, int out, int err);
+int t_join (int argc, char **argv, int in, int out, int err);
+int t_fold (int argc, char **argv, int in, int out, int err);
+int t_expand (int argc, char **argv, int in, int out, int err);
+int t_unexpand (int argc, char **argv, int in, int out, int err);
+int t_split (int argc, char **argv, int in, int out, int err);
+int t_shuf (int argc, char **argv, int in, int out, int err);
+int t_column (int argc, char **argv, int in, int out, int err);
+int t_od (int argc, char **argv, int in, int out, int err);
+int t_xxd (int argc, char **argv, int in, int out, int err);
+int t_hexdump (int argc, char **argv, int in, int out, int err);
+int t_strings (int argc, char **argv, int in, int out, int err);
+int t_cmp (int argc, char **argv, int in, int out, int err);
+int t_fmt (int argc, char **argv, int in, int out, int err);
 
 /* }================================================================== */
 

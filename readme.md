@@ -94,6 +94,9 @@ Android has no `/tmp`). mmc-term needs X11 or Cocoa, so Android gets the shell.
 | `carch.c` | deflate and inflate, CRC-32; `gzip gunzip zcat tar` |
 | `czip.c` | `zip unzip` |
 | `cawk.c` | `awk` |
+| `cinfo.c` | `stat date nproc printenv tty mktemp truncate yes expr sync nohup timeout xargs cygpath` |
+| `cmore.c` | `tac rev nl paste comm join fold expand unexpand split shuf column od xxd hexdump strings cmp fmt` |
+| `chash.c` | `md5sum sha1sum sha224sum sha256sum sha384sum sha512sum cksum sum base64 base32` (not written yet: they say so) |
 | `mmc.rc`, `mmc.ico` | Windows only: the program icon and version details |
 | `mterm.h` | **mmc-term**, the terminal window: its one shared header |
 | `mterm.c` | `main` of mmc-term, command line |

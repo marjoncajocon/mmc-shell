@@ -414,6 +414,14 @@ int sh_hash_add (const char *name) {
 }
 
 
+/* With no bash or sh in PATH, those names mean this shell, as a "#!"
+** line already does: scripts that run "bash -c ..." (xargs, find -exec)
+** work on a PC without git-bash. */
+static char *self_as_sh (const char *name) {
+  if (strcmp(name, "bash") == 0 || strcmp(name, "sh") == 0) return xstrdup(mmc_exe());
+  return NULL;
+}
+
 char *sh_find_command (const char *name) {
   HashEnt *h;
   char *found;
@@ -437,6 +445,10 @@ char *sh_find_command (const char *name) {
       if (strncmp(name, std_dirs[k], n) == 0 && strchr(name + n, '/') == NULL && name[n])
         found = search_path(name + n);
     }
+    for (k = 0; found == NULL && std_dirs[k] != NULL; k++) {	/* /bin/sh */
+      size_t n = strlen(std_dirs[k]);
+      if (strncmp(name, std_dirs[k], n) == 0) found = self_as_sh(name + n);
+    }
     return found;
   }
   if ((h = hash_get(name)) != NULL) {
@@ -447,6 +459,7 @@ char *sh_find_command (const char *name) {
     }
   }
   found = search_path(name);
+  if (found == NULL) found = self_as_sh(name);
   /* Windows' own find.exe, sort.exe ... are not the Linux ones: our
   ** fallback of that name wins over them (find.exe still reaches them) */
   if (found != NULL && os_is_system_program(found)) {

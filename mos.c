@@ -1405,6 +1405,205 @@ int os_is_system_program (const char *native) {
   return r;
 }
 
+
+/* 100 ns units since 1601 -> seconds since 1970 and nanoseconds */
+static void ft_split (long long v, time_t *sec, long *ns) {
+  long long u = v - 116444736000000000LL, s = u / 10000000LL, r = u % 10000000LL;
+  if (r < 0) {
+    r += 10000000LL;
+    s--;
+  }
+  *sec = (time_t)s;
+  *ns = (long)(r * 100);
+}
+
+
+/* what git-bash's stat shows: the volume serial number, the file id,
+** the change time, the birth time, 1 KiB blocks, 64 KiB IO blocks */
+int os_stat_x (const char *native, int follow, OsStat *st, OsStatX *x) {
+  wchar_t *w;
+  HANDLE h;
+  BY_HANDLE_FILE_INFORMATION fi;
+  FILE_BASIC_INFO bi;
+  FILE_STANDARD_INFO si;
+  memset(x, 0, sizeof(*x));
+  x->blksize = 65536;
+  x->block_unit = 1024;
+  if ((follow ? os_stat(native, st) : os_lstat(native, st)) != 0) return -1;
+  if (st->is_chr) {	/* NUL, /dev/null: 1,3 as on Linux, and always new */
+    x->rdev_major = 1;
+    x->rdev_minor = 3;
+    st->nlink = 1;
+    st->uid = st->gid = 1000;
+    st->atime = st->mtime = st->ctime = time(NULL);
+    return 0;
+  }
+  st->blocks = (st->size + 1023) / 1024;
+  w = widen(native);
+  h = CreateFileW(w, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                  NULL, OPEN_EXISTING,
+                  FILE_FLAG_BACKUP_SEMANTICS | (follow ? 0 : FILE_FLAG_OPEN_REPARSE_POINT), NULL);
+  free(w);
+  if (h == INVALID_HANDLE_VALUE) return 0;	/* what os_stat had is all there is */
+  if (GetFileInformationByHandle(h, &fi)) {
+    st->dev = fi.dwVolumeSerialNumber;
+    st->ino = ((unsigned long long)fi.nFileIndexHigh << 32) | fi.nFileIndexLow;
+    st->nlink = fi.nNumberOfLinks;
+  }
+  if (GetFileInformationByHandleEx(h, FileBasicInfo, &bi, sizeof(bi))) {
+    ft_split(bi.LastAccessTime.QuadPart, &st->atime, &x->atime_ns);
+    ft_split(bi.LastWriteTime.QuadPart, &st->mtime, &x->mtime_ns);
+    ft_split(bi.ChangeTime.QuadPart, &st->ctime, &x->ctime_ns);
+    ft_split(bi.CreationTime.QuadPart, &x->btime, &x->btime_ns);
+    x->has_btime = 1;
+  }
+  if (GetFileInformationByHandleEx(h, FileStandardInfo, &si, sizeof(si)))
+    st->blocks = (long long)((si.AllocationSize.QuadPart + 1023) / 1024);
+  CloseHandle(h);
+  return 0;
+}
+
+
+static long long civil_days (int y, int m, int d) {	/* days since 1970-01-01 */
+  long long era, yoe, doy, doe;
+  y -= m <= 2;
+  era = (y >= 0 ? y : y - 399) / 400;
+  yoe = y - era * 400;
+  doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
+
+
+/* the zone's abbreviation the way Cygwin makes it: "Malay Peninsula
+** Standard Time" -> MPST */
+int os_localzone (time_t t, long *gmtoff, int *isdst, char *zone, size_t n) {
+  TIME_ZONE_INFORMATION tz;
+  SYSTEMTIME utc, loc;
+  FILETIME ft;
+  unsigned long long v;
+  long long secs;
+  const wchar_t *name;
+  size_t k = 0;
+  *gmtoff = 0;
+  *isdst = 0;
+  if (n > 0) zone[0] = '\0';
+  if (t < -11644473600LL) t = -11644473600LL;
+  v = ((unsigned long long)((long long)t + 11644473600LL)) * 10000000ULL;
+  ft.dwLowDateTime = (DWORD)v;
+  ft.dwHighDateTime = (DWORD)(v >> 32);
+  if (!FileTimeToSystemTime(&ft, &utc) || !SystemTimeToTzSpecificLocalTime(NULL, &utc, &loc))
+    return -1;
+  secs = civil_days(loc.wYear, loc.wMonth, loc.wDay) * 86400LL + loc.wHour * 3600L +
+         loc.wMinute * 60L + loc.wSecond;
+  *gmtoff = (long)(secs - (long long)t);
+  if (!GetTimeZoneInformationForYear(loc.wYear, NULL, &tz) &&
+      GetTimeZoneInformation(&tz) == TIME_ZONE_ID_INVALID)
+    return 0;
+  *isdst = tz.DaylightDate.wMonth != 0 && *gmtoff != -tz.Bias * 60L;
+  name = *isdst ? tz.DaylightName : tz.StandardName;
+  for (; *name && k + 1 < n; name++)
+    if (*name >= L'A' && *name <= L'Z') zone[k++] = (char)*name;
+  if (n > 0) zone[k] = '\0';
+  return 0;
+}
+
+
+int os_nproc (int all) {
+  DWORD n = GetActiveProcessorCount(0xFFFF);	/* ALL_PROCESSOR_GROUPS */
+  (void)all;
+  if (n == 0) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    n = si.dwNumberOfProcessors;
+  }
+  return n > 0 ? (int)n : 1;
+}
+
+
+long os_arg_max (void) {
+  return 32000;	/* CreateProcess takes 32767 characters; git-bash says 32000 */
+}
+
+
+int os_ftruncate (int fd, long long size) {
+  if (_chsize_s(fd, size) != 0) return fail_errno();
+  return 0;
+}
+
+
+int os_fsync (int fd) {
+  HANDLE h = (HANDLE)_get_osfhandle(fd);
+  if (h == INVALID_HANDLE_VALUE) return fail();
+  if (!FlushFileBuffers(h) && GetLastError() != ERROR_ACCESS_DENIED &&
+      GetLastError() != ERROR_INVALID_HANDLE)	/* read only: nothing of ours to write */
+    return fail();
+  return 0;
+}
+
+
+void os_sync (void) {
+  /* flushing a whole volume needs an administrator: the files we wrote
+  ** went through the system cache, which Windows writes out itself */
+}
+
+
+char *os_ttyname (int fd) {
+  return os_is_tty(fd) ? xstrdup("/dev/cons0") : NULL;
+}
+
+
+/* the process and everything it started, newest last; a process id is
+** taken only when that process started after its parent */
+static void proc_tree (DWORD pid, ULONGLONG born, DWORD *out, int *n, int max, int depth) {
+  HANDLE snap;
+  PROCESSENTRY32 pe;
+  DWORD kids[256];
+  int nk = 0, i;
+  if (depth > 16 || (snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)) == INVALID_HANDLE_VALUE)
+    return;
+  pe.dwSize = sizeof(pe);
+  if (Process32First(snap, &pe)) {
+    do {
+      if (pe.th32ParentProcessID == pid && pe.th32ProcessID != pid && nk < 256)
+        kids[nk++] = pe.th32ProcessID;
+    } while (Process32Next(snap, &pe));
+  }
+  CloseHandle(snap);
+  for (i = 0; i < nk && *n < max; i++) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, kids[i]);
+    FILETIME c, e, k, u;
+    ULONGLONG cb;
+    if (h == NULL) continue;
+    if (!GetProcessTimes(h, &c, &e, &k, &u)) {
+      CloseHandle(h);
+      continue;
+    }
+    CloseHandle(h);
+    cb = ((ULONGLONG)c.dwHighDateTime << 32) | c.dwLowDateTime;
+    if (cb < born) continue;	/* an old process that reuses a dead parent's id */
+    out[(*n)++] = kids[i];
+    proc_tree(kids[i], cb, out, n, max, depth + 1);
+  }
+}
+
+
+int os_kill_tree (long pid, int sig) {
+  DWORD all[512];
+  int n = 0, i, r;
+  HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+  if (h != NULL) {
+    FILETIME c, e, k, u;
+    if (GetProcessTimes(h, &c, &e, &k, &u))
+      proc_tree((DWORD)pid, ((ULONGLONG)c.dwHighDateTime << 32) | c.dwLowDateTime, all, &n,
+                512, 0);
+    CloseHandle(h);
+  }
+  r = os_kill(pid, sig);	/* first the process: it must not start more */
+  for (i = 0; i < n; i++) os_kill((long)all[i], sig);
+  return r;
+}
+
 /* }================================================================== */
 
 
@@ -1437,6 +1636,8 @@ int os_is_system_program (const char *native) {
 #ifdef __APPLE__
 #include <sys/mount.h>
 #include <sys/sysctl.h>
+#else
+#include <sys/sysmacros.h>	/* major() minor() */
 #endif
 
 /* job control, see below */
@@ -2559,6 +2760,103 @@ char *os_group_name (long gid) {
 int os_is_system_program (const char *native) {
   (void)native;
   return 0;
+}
+
+
+int os_stat_x (const char *native, int follow, OsStat *st, OsStatX *x) {
+  struct stat s;
+  memset(st, 0, sizeof(*st));
+  memset(x, 0, sizeof(*x));
+  if ((follow ? stat(native, &s) : lstat(native, &s)) != 0) return -1;
+  fill_stat(st, &s);
+#ifdef __APPLE__
+  x->atime_ns = (long)s.st_atimespec.tv_nsec;
+  x->mtime_ns = (long)s.st_mtimespec.tv_nsec;
+  x->ctime_ns = (long)s.st_ctimespec.tv_nsec;
+  x->btime = s.st_birthtimespec.tv_sec;
+  x->btime_ns = (long)s.st_birthtimespec.tv_nsec;
+  x->has_btime = 1;
+#else
+  x->atime_ns = (long)s.st_atim.tv_nsec;
+  x->mtime_ns = (long)s.st_mtim.tv_nsec;
+  x->ctime_ns = (long)s.st_ctim.tv_nsec;
+#endif
+  x->blksize = (unsigned long)s.st_blksize;
+  x->block_unit = 512;
+  x->dev_major = (unsigned long)major(s.st_dev);
+  x->dev_minor = (unsigned long)minor(s.st_dev);
+  x->rdev_major = (unsigned long)major(s.st_rdev);
+  x->rdev_minor = (unsigned long)minor(s.st_rdev);
+  return 0;
+}
+
+
+static long long civil_days (int y, int m, int d) {	/* days since 1970-01-01 */
+  long long era, yoe, doy, doe;
+  y -= m <= 2;
+  era = (y >= 0 ? y : y - 399) / 400;
+  yoe = y - era * 400;
+  doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
+
+
+int os_localzone (time_t t, long *gmtoff, int *isdst, char *zone, size_t n) {
+  struct tm tm;
+  long long secs;
+  *gmtoff = 0;
+  *isdst = 0;
+  if (n > 0) zone[0] = '\0';
+  tzset();
+  if (localtime_r(&t, &tm) == NULL) return -1;
+  secs = civil_days(tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday) * 86400LL +
+         tm.tm_hour * 3600L + tm.tm_min * 60L + tm.tm_sec;
+  *gmtoff = (long)(secs - (long long)t);
+  *isdst = tm.tm_isdst > 0;
+  if (n > 0) {
+    strncpy(zone, tzname[*isdst ? 1 : 0], n - 1);
+    zone[n - 1] = '\0';
+  }
+  return 0;
+}
+
+
+int os_nproc (int all) {
+  long n = sysconf(all ? _SC_NPROCESSORS_CONF : _SC_NPROCESSORS_ONLN);
+  return n > 0 ? (int)n : 1;
+}
+
+
+long os_arg_max (void) {
+  long n = sysconf(_SC_ARG_MAX);
+  return n > 0 ? n : 131072;
+}
+
+
+int os_ftruncate (int fd, long long size) {
+  return ftruncate(fd, (off_t)size);
+}
+
+
+int os_fsync (int fd) {
+  return fsync(fd);
+}
+
+
+void os_sync (void) {
+  sync();
+}
+
+
+char *os_ttyname (int fd) {
+  const char *t = isatty(fd) ? ttyname(fd) : NULL;
+  return t ? xstrdup(t) : NULL;
+}
+
+
+int os_kill_tree (long pid, int sig) {
+  return os_kill(pid, sig);
 }
 
 /* }================================================================== */

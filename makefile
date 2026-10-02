@@ -18,7 +18,7 @@ FONTS= JetBrainsMonoNerdFontMono-Regular.ttf JetBrainsMonoNerdFontMono-Bold.ttf 
 
 BASE= mutil.c mpath.c mos.c
 # the tools: ls cp rm grep sed sort tar awk ..., for PCs without them
-TOOLS= ctool.c cfile.c cfind.c ctext.c cgrep.c csed.c csys.c cdiff.c carch.c czip.c cawk.c
+TOOLS= ctool.c cfile.c cfind.c ctext.c cgrep.c csed.c csys.c cdiff.c carch.c czip.c cawk.c chash.c cinfo.c cmore.c
 SRC= mmc.c mparse.c mexpand.c mpattern.c marith.c mregex.c mvar.c mexec.c \
 	mjobs.c mbuiltin.c mbvars.c mbio.c mbtest.c mline.c mcomp.c $(TOOLS) $(BASE)
 CORE= tgrid.c tvt.c ttheme.c tfont.c tshape.c tdraw.c
