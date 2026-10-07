@@ -56,6 +56,11 @@ make cross
 make install PREFIX=~/mmc
 ```
 
+`build.sh` is `build.bat` for a bash-like shell, with the same words
+(`./build.sh`, `./build.sh cross`, `test`, `install DIR`, `release`, `clean`):
+run it with mmc itself (`mmc build.sh release`), git-bash, or on Linux and
+macOS, where it builds with `CC` when that is set, as `make` does.
+
 `build cross` makes Windows, Linux (static, musl) and macOS programs, each
 for x86_64 and aarch64, from any of the three systems, and `mmc-arm-linux`
 for older 32 bit phones. The static Linux programs are also the Android ones:
