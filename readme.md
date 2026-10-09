@@ -5,6 +5,8 @@
 A small, portable, git-bash style shell written from scratch in pure C11.
 No dependencies, no installer: one executable that you can carry on any drive.
 
+![mmc-shell in mmc-term: ls, a pipeline, grep, zip and unzip, find](docs/mmc-shell.gif)
+
 ```
 marjon@DESKTOP MMC ~/projects/app (main)
 $ code .
