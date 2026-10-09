@@ -153,8 +153,9 @@ static void build_lengths (const unsigned *freq, int n, int maxbits, unsigned ch
     free(order);
     return;
   }
-  if (used == 1) {
+  if (used == 1) {	/* a second, unused code: inflaters reject an incomplete set */
     len[order[0]] = 1;
+    len[order[0] == 0 ? 1 : 0] = 1;
     free(order);
     return;
   }
@@ -203,6 +204,21 @@ static void build_lengths (const unsigned *freq, int n, int maxbits, unsigned ch
       if (best < 0) break;
       kraft -= 1LL << (maxbits - len[best] - 1);
       len[best]++;
+    }
+    /* that may overshoot, leaving the code incomplete (zlib: "invalid code
+    ** lengths set"): shorten the most frequent codes that still fit */
+    while (kraft < cap) {
+      int s = -1;
+      for (i = used - 1; i >= 0; i--) {
+        int t = order[i];
+        if (len[t] > 1 && (1LL << (maxbits - len[t])) <= cap - kraft) {
+          s = t;
+          break;
+        }
+      }
+      if (s < 0) break;
+      kraft += 1LL << (maxbits - len[s]);
+      len[s]--;
     }
   }
   free(order);
