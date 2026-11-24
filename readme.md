@@ -196,6 +196,16 @@ phosphor, amber, fjord, neon, moss, graphite, void, mocha, dune, volt and the
 light ones daylight, paper, lagoon, lavender, mint. Ctrl+Shift+L goes through
 them in this order; right click > *Choose theme...* lists them all.
 
+**Look.** Every theme also brings a look, which right click > *Look...* or
+`etc/mmcterm.conf` can change (`theme` there means: as the theme has it):
+
+| Setting | |
+|---|---|
+| `tabs=classic\|pill\|flat\|line` | round-topped tabs, round pills, square tabs with an accent line on top, or only text with an accent line under the active tab |
+| `panes=plain\|cards` | cards: the text floats on a round card over a darker ground; split panes are separate cards, the focused one with an accent edge |
+| `statusbar=yes\|no` | a powerline bar at the bottom: the title, the size of the pane, the time (the window grows by it, the rows stay) |
+| `crt=yes\|no` | an old screen: scanlines, a soft glow on the text and darker corners (the whole window is drawn each time, a little slower) |
+
 **Tabs.** Every tab is its own shell, started in the folder of the tab you
 are in. The tab bar shows up with the second tab — the window grows by its
 height, so no shell loses a line — and goes away again with the last but

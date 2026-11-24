@@ -198,7 +198,18 @@ typedef struct Theme {
   int dark;
   uint32_t bg, fg, cursor, cursor_text, sel_bg, accent1, accent2, ui, ui_text;
   uint32_t pal[16];
+  int look;	/* LOOK_* bits: how the window around the text is drawn */
 } Theme;
+
+/* the tab style (two bits), then the extras */
+#define LOOK_CLASSIC	0	/* round-topped tabs that run into the text */
+#define LOOK_PILL	1	/* round pills */
+#define LOOK_FLAT	2	/* square tabs, an accent line on top of the active one */
+#define LOOK_LINE	3	/* only text, an accent line under the active one */
+#define LOOK_TABS	3	/* the mask of the tab style */
+#define LOOK_CARDS	4	/* panes float as round cards over a darker ground */
+#define LOOK_STATUS	8	/* a powerline status bar at the bottom */
+#define LOOK_CRT	16	/* scanlines, glow and dark corners of an old screen */
 
 typedef struct Config {
   char theme[32];
@@ -212,6 +223,9 @@ typedef struct Config {
   int native_titlebar;	/* 1: let the system draw the title bar */
   int smoothing;	/* SMOOTH_*: how glyphs are rasterized */
   int ligatures;	/* 1: the font's ligatures (calt, liga) are used */
+  /* the look, -1 each: as the theme has it */
+  int tabs;	/* LOOK_CLASSIC .. LOOK_LINE */
+  int cards, status, crt;	/* 0 or 1 */
   int has_bg, has_fg, has_cursor;
   uint32_t bg, fg, cursor_color;
   int has_pal[16];
@@ -332,7 +346,7 @@ typedef struct Frame {
   int dy, dh;	/* the rows of pixels the last drawing changed */
 } Frame;
 
-#define MENU_MAX	32
+#define MENU_MAX	40
 #define TAB_MAX	32
 #define PANE_MAX	8	/* panes in one tab */
 
@@ -379,6 +393,10 @@ typedef struct Scene {	/* everything the renderer needs to know */
   int bar_alpha;	/* scrollbar 0..255 */
   const char *pill;	/* size hint while resizing, or NULL */
   const Menu *menu;
+  int gap;	/* LOOK_CARDS: the ground around the cards, in pixels */
+  int status;	/* height of the status bar at the bottom, 0 = none */
+  const char *status_text;	/* in it: the title, the size and the time */
+  char status_size[16], status_time[8];
 } Scene;
 
 void frame_resize (Frame *f, int w, int h);

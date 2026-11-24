@@ -454,6 +454,84 @@ static void test_powerline (void) {
 }
 
 
+/* the look of the window: theme defaults, settings over them, and what
+** the cards, the status bar and the old screen paint */
+static void test_look (void) {
+  Config c;
+  Theme th;
+  Grid *g;
+  Frame f;
+  Scene s;
+  const int cw = 9, ch = 18, cols = 20, rows = 4;
+  int x, y, top, darker;
+  uint32_t ground;
+  config_defaults(&c);
+  check_int("dark has classic tabs", theme_find("dark")->look, LOOK_CLASSIC);
+  check_int("aurora: line tabs, cards", theme_find("aurora")->look, LOOK_LINE | LOOK_CARDS);
+  check_int("ember: status bar", (theme_find("ember")->look & LOOK_STATUS) != 0, 1);
+  check_int("phosphor: crt", (theme_find("phosphor")->look & LOOK_CRT) != 0, 1);
+  check_int("sakura: pill tabs", theme_find("sakura")->look & LOOK_TABS, LOOK_PILL);
+  theme_apply(&th, theme_find("aurora"), &c);
+  check_int("no settings: the theme's look", th.look, LOOK_LINE | LOOK_CARDS);
+  c.tabs = LOOK_PILL;
+  c.cards = 0;
+  c.status = 1;
+  c.crt = 1;
+  theme_apply(&th, theme_find("aurora"), &c);
+  check_int("settings win over the theme", th.look, LOOK_PILL | LOOK_STATUS | LOOK_CRT);
+  /* a card with a status bar under it */
+  config_defaults(&c);
+  c.status = 1;
+  theme_apply(&th, theme_find("moss"), &c);	/* cards */
+  g = grid_new(cols, rows, 0);
+  memset(&s, 0, sizeof(s));
+  s.g = g;
+  s.t = &th;
+  s.cw = cw;
+  s.ch = ch;
+  s.ascent = ch * 3 / 4;
+  s.strip = 2;
+  s.gap = 6;
+  s.pad = 6 + 8;
+  s.status = ch + 6;
+  strcpy(s.status_size, "20x4");
+  strcpy(s.status_time, "13:58");
+  s.status_text = "MMC:~";
+  memset(&f, 0, sizeof(f));
+  frame_resize(&f, 2 * s.pad + cols * cw, s.strip + 2 * s.pad + rows * ch + s.status);
+  draw_scene(&f, &s);
+  top = s.strip;
+  ground = f.px[(top + 1) * f.w + 1];
+  check_int("cards: the ground around them is darker", ground != th.bg, 1);
+  check_int("cards: the card has the text background",
+            f.px[(top + s.pad + ch + 2) * f.w + s.pad + 5 * cw] == th.bg, 1);
+  check_int("cards: round corner shows the ground",
+            f.px[(top + s.gap) * f.w + s.gap] != th.bg, 1);
+  check_int("status bar starts with accent1",
+            f.px[(f.h - 1) * f.w + 1] == th.accent1, 1);
+  check_int("status bar ends with accent1 (the time)",
+            f.px[(f.h - 1) * f.w + f.w - 2] == th.accent1, 1);
+  /* the old screen darkens every third row of pixels */
+  config_defaults(&c);
+  c.crt = 1;
+  theme_apply(&th, theme_find("graphite"), &c);
+  th.bg = 0x808080;
+  s.status = 0;
+  s.gap = 0;
+  s.pad = 6;
+  draw_scene(&f, &s);
+  y = f.h / 2;
+  y -= (y - s.head) % 3;	/* a row that stays */
+  x = f.w / 2;
+  darker = (f.px[(y + 2) * f.w + x] & 0xFF) < (f.px[y * f.w + x] & 0xFF);
+  check_int("crt: scanline is darker", darker, 1);
+  check_int("crt: corners are darker",
+            (f.px[(f.h - 1) * f.w] & 0xFF) < (f.px[y * f.w + x] & 0xFF), 1);
+  frame_free(&f);
+  grid_free(g);
+}
+
+
 static const char *const demo =
   "\033]0;MMC:~/w/mmc\007"
   "\033[32mmarjon@DESKTOP \033[0;44;97;1m MMC \033[0m \033[1m~/w/mmc\033[0;36m (main)\033[0m\r\n"
@@ -1047,6 +1125,7 @@ int main (int argc, char **argv) {
   test_modes();
   test_contrast();
   test_powerline();
+  test_look();
   test_clusters_links();
   test_partial();
   test_shaping();

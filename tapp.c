@@ -12,13 +12,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 
 enum { M_COPY = 1, M_PASTE, M_SELECT_ALL, M_BIGGER, M_SMALLER,
        M_MORE_CLEAR, M_LESS_CLEAR, M_NEW_TAB, M_RENAME_TAB, M_CLOSE_TAB,
        M_NEW_WINDOW, M_ABOUT, M_FIND, M_SPLIT_RIGHT, M_SPLIT_DOWN, M_CLOSE_PANE,
-       M_BLINK, M_THEMES,
-       M_THEME /* + theme number, keep last */ };
+       M_BLINK, M_THEMES, M_LOOK, M_CARDS, M_STATUSBAR, M_CRT, M_LOOK_THEME,
+       M_TABS,	/* + LOOK_CLASSIC .. LOOK_LINE */
+       M_THEME = M_TABS + 4 /* + theme number, keep last */ };
 
 /* one shell with its own screen: a tab has one, or several side by side */
 typedef struct Pane {
@@ -69,6 +71,9 @@ static struct {
   float scale;
   int zoom;	/* points added to the configured font size */
   int pad, strip;
+  int gap;	/* LOOK_CARDS: the ground around the cards (in A.pad) */
+  int status;	/* height of the status bar at the bottom, 0 = none */
+  int status_min;	/* the minute it shows */
   int custom, head;	/* our own title bar and its height (0: none) */
   int bar;	/* height of the tab bar (0: one tab, no bar) */
   int hot_tab, hot_close, pressed_close;
@@ -166,6 +171,25 @@ static int bar_height (void) {
 }
 
 
+/* the padding (with the ground of the cards) and the status bar of the look */
+static void look_geometry (void) {
+  int look = A.theme.look, inner = (int)((float)A.cfg.padding * A.scale + 0.5f);
+  A.gap = 0;
+  if (look & LOOK_CARDS) {
+    int r = (int)(8.0f * A.scale + 0.5f);
+    A.gap = (int)(6.0f * A.scale + 0.5f);
+    if (A.gap < 2) A.gap = 2;
+    if (inner < r) inner = r;	/* the round corners need room */
+  }
+  A.pad = A.gap + inner;
+  A.status = 0;
+  if (look & LOOK_STATUS) {
+    A.status = (int)(24.0f * A.scale + 0.5f);
+    if (A.status < font_cell_h() + 6) A.status = font_cell_h() + 6;
+  }
+}
+
+
 static void apply_font (void) {
   float px = (float)(A.cfg.font_size + A.zoom) * A.scale * 96.0f / 72.0f;
   int i, k;
@@ -176,7 +200,7 @@ static void apply_font (void) {
       A.tabs[i]->panes[k]->g->cell_h = font_cell_h();
     }
   A.bar = bar_height();
-  A.pad = (int)((float)A.cfg.padding * A.scale + 0.5f);
+  look_geometry();
   A.strip = (int)(2.0f * A.scale + 0.5f);	/* the thin blue to green line */
   if (A.strip < 1) A.strip = 1;
   A.head = 0;
@@ -189,7 +213,7 @@ static void apply_font (void) {
 
 static void size_for (int cols, int rows, int *w, int *h) {
   *w = 2 * A.pad + cols * font_cell_w();
-  *h = TOP + 2 * A.pad + rows * font_cell_h();
+  *h = TOP + 2 * A.pad + rows * font_cell_h() + A.status;
 }
 
 
@@ -200,14 +224,14 @@ void app_initial_size (int *w, int *h) {
 
 void app_snap_size (int *w, int *h) {
   int cols = (*w - 2 * A.pad + font_cell_w() / 2) / font_cell_w();
-  int rows = (*h - TOP - 2 * A.pad + font_cell_h() / 2) / font_cell_h();
+  int rows = (*h - TOP - 2 * A.pad - A.status + font_cell_h() / 2) / font_cell_h();
   size_for(cols < 20 ? 20 : cols, rows < 4 ? 4 : rows, w, h);
 }
 
 
 void app_on_resize (int w, int h) {
   int cols = (w - 2 * A.pad) / font_cell_w();
-  int rows = (h - TOP - 2 * A.pad) / font_cell_h();
+  int rows = (h - TOP - 2 * A.pad - A.status) / font_cell_h();
   if (w <= 0 || h <= 0) return;
   if (cols < 2) cols = 2;
   if (rows < 1) rows = 1;
@@ -261,6 +285,18 @@ static void apply_bar (void) {
     else refit_window();
   }
   touch();
+}
+
+
+/* the theme or a setting changed the look: when the padding or the status
+** bar changed with it, the window keeps the rows and changes its size, as
+** for the tab bar */
+static void apply_look (void) {
+  int pad = A.pad, status = A.status;
+  look_geometry();
+  if (A.win_w <= 0 || (pad == A.pad && status == A.status)) return;
+  if (A.fullscreen || win_is_maximized()) app_on_resize(A.win_w, A.win_h);
+  else refit_window();
 }
 
 
@@ -330,8 +366,41 @@ static void set_theme (const char *name, int save) {
   /* a quiet frame: the header color with only a hint of the logo blue */
   win_set_chrome(A.theme.bg, blend(A.theme.ui, A.theme.accent1, A.theme.dark ? 70 : 110),
                  A.theme.fg, A.theme.dark);
+  apply_look();
   if (save && A.conf != NULL) config_set_key(A.conf, "theme", A.cfg.theme);
   touch();
+}
+
+
+static const char *const tab_style_names[4] = {"classic", "pill", "flat", "line"};
+
+/* a setting of the look from the menu: kept in mmcterm.conf, then drawn */
+static void set_look (int id) {
+  int look = A.theme.look;
+  if (id >= M_TABS && id < M_TABS + 4) {
+    A.cfg.tabs = id - M_TABS;
+    config_set_key(A.conf, "tabs", tab_style_names[A.cfg.tabs]);
+  }
+  else if (id == M_CARDS) {
+    A.cfg.cards = !(look & LOOK_CARDS);
+    config_set_key(A.conf, "panes", A.cfg.cards ? "cards" : "plain");
+  }
+  else if (id == M_STATUSBAR) {
+    A.cfg.status = !(look & LOOK_STATUS);
+    config_set_key(A.conf, "statusbar", A.cfg.status ? "yes" : "no");
+  }
+  else if (id == M_CRT) {
+    A.cfg.crt = !(look & LOOK_CRT);
+    config_set_key(A.conf, "crt", A.cfg.crt ? "yes" : "no");
+  }
+  else {	/* M_LOOK_THEME: all of it as the theme has it */
+    A.cfg.tabs = A.cfg.cards = A.cfg.status = A.cfg.crt = -1;
+    config_set_key(A.conf, "tabs", "theme");
+    config_set_key(A.conf, "panes", "theme");
+    config_set_key(A.conf, "statusbar", "theme");
+    config_set_key(A.conf, "crt", "theme");
+  }
+  set_theme(A.cfg.theme, 0);
 }
 
 
@@ -526,6 +595,23 @@ static void menu_themes (int x, int y) {
 }
 
 
+/* the tab style and the extras, ticked as they are now */
+static void menu_look (int x, int y) {
+  static const char *const titles[4] = {"Classic tabs", "Pill tabs", "Flat tabs", "Line tabs"};
+  int look = A.theme.look, i;
+  memset(&A.menu, 0, sizeof(A.menu));
+  for (i = 0; i < 4; i++)
+    menu_add(titles[i], (look & LOOK_TABS) == i ? "\xE2\x9C\x93" : NULL, M_TABS + i);
+  menu_add(NULL, NULL, 0);
+  menu_add("Floating panes", (look & LOOK_CARDS) ? "\xE2\x9C\x93" : NULL, M_CARDS);
+  menu_add("Status bar", (look & LOOK_STATUS) ? "\xE2\x9C\x93" : NULL, M_STATUSBAR);
+  menu_add("CRT screen", (look & LOOK_CRT) ? "\xE2\x9C\x93" : NULL, M_CRT);
+  menu_add(NULL, NULL, 0);
+  menu_add("As the theme has it", NULL, M_LOOK_THEME);
+  menu_show(x, y);
+}
+
+
 static void menu_open (int x, int y) {
   static char title[48];
   Menu *m = &A.menu;
@@ -547,6 +633,7 @@ static void menu_open (int x, int y) {
   sprintf(title, "Next theme: %.20s", next->title);
   menu_add(title, "Ctrl+Shift+L", M_THEME + (int)(next - theme_at(0)));
   menu_add("Choose theme...", theme_find(A.cfg.theme)->title, M_THEMES);
+  menu_add("Look...", "tabs, panes, bars", M_LOOK);
   menu_add(NULL, NULL, 0);
   menu_add("Bigger text", "Ctrl +", M_BIGGER);
   menu_add("Smaller text", "Ctrl -", M_SMALLER);
@@ -591,8 +678,17 @@ static void menu_do (int id) {
     case M_CLOSE_PANE: close_pane(CP); break;
     case M_BLINK: toggle_blink(); break;
     case M_THEMES: menu_themes(A.menu.x, A.menu.y); break;
+    case M_LOOK: menu_look(A.menu.x, A.menu.y); break;
+    case M_CARDS: case M_STATUSBAR: case M_CRT: case M_LOOK_THEME:
+      set_look(id);
+      menu_look(A.menu.x, A.menu.y);	/* open again: one may want more */
+      break;
     default:
-      if (id >= M_THEME && theme_at(id - M_THEME) != NULL)
+      if (id >= M_TABS && id < M_TABS + 4) {
+        set_look(id);
+        menu_look(A.menu.x, A.menu.y);
+      }
+      else if (id >= M_THEME && theme_at(id - M_THEME) != NULL)
         set_theme(theme_at(id - M_THEME)->name, 1);
       break;
   }
@@ -1485,7 +1581,7 @@ static void sel_extend (void) {
 
 static void scrollbar_drag (int y) {
   int bx, by, bw, bh, track_y = TOP + 4;
-  int track_h = A.win_h - track_y - 4;
+  int track_h = A.win_h - A.status - track_y - 4;
   draw_scrollbar_rect(&A.frame, &A.scene, &bx, &by, &bw, &bh);
   if (track_h - bh > 0 && A.g->sb_len > 0) {
     long pos = (long)(y - A.bar_grab - track_y) * A.g->sb_len / (track_h - bh);
@@ -1545,6 +1641,9 @@ void app_on_mouse (int type, int button, int x, int y, int mods, int arg) {
     return;
   }
   if (tabbar_mouse(type, button, x, y)) return;
+  if (type == TMS_DOWN && button != 3 && A.status > 0 && y >= A.win_h - A.status &&
+      !A.selecting)
+    return;	/* the status bar only shows */
   if (type == TMS_DOWN && button == 1 && (mods & TM_CTRL) && y >= TOP) {
     hover(x, y);
     if (A.has_hot) {	/* Ctrl+click on a link opens it */
@@ -2351,11 +2450,19 @@ void app_on_tick (unsigned now) {
   }
   if (A.selecting) {	/* dragging beyond the edge scrolls */
     if (A.mouse_y < TOP + A.pad) scroll_view(1);
-    else if (A.mouse_y > A.win_h - A.pad) scroll_view(-1);
+    else if (A.mouse_y > A.win_h - A.status - A.pad) scroll_view(-1);
   }
   if (A.bar_until != 0 && now > A.bar_until && !A.bar_hover && !A.bar_drag) {
     A.bar_until = 0;
     touch();
+  }
+  if (A.status > 0) {	/* the clock in the status bar */
+    time_t now_t = time(NULL);
+    const struct tm *tm = localtime(&now_t);
+    if (tm != NULL && tm->tm_min != A.status_min) {
+      A.status_min = tm->tm_min;
+      touch();
+    }
   }
   if (A.dirty && A.sync_since != 0) win_redraw();	/* a held screen: try again */
   if (A.pill_until != 0 && now > A.pill_until && !A.resizing) {
@@ -2426,6 +2533,16 @@ static void build_scene (void) {
     s->pill = A.edit_pill;
   }
   s->menu = &A.menu;
+  s->gap = A.gap;
+  s->status = A.status;
+  if (A.status > 0) {
+    time_t now_t = time(NULL);
+    const struct tm *tm = localtime(&now_t);
+    s->status_text = s->title;
+    snprintf(s->status_size, sizeof(s->status_size), "%dx%d", CP->g->cols, CP->g->rows);
+    if (tm != NULL) snprintf(s->status_time, sizeof(s->status_time), "%02d:%02d",
+                             tm->tm_hour, tm->tm_min);
+  }
   if (CUR->npanes > 1) {	/* a split tab: every pane where it is */
     for (i = 0; i < CUR->npanes; i++) {
       const Pane *p = CUR->panes[i];
@@ -2475,12 +2592,16 @@ static uint32_t look_of (const Scene *s) {
   v[n++] = s->bar_alpha; v[n++] = s->text_blink_on; v[n++] = s->npanes;
   v[n++] = s->ox; v[n++] = s->oy; v[n++] = s->ndivs; v[n++] = s->g->view;
   v[n++] = s->g->cols; v[n++] = s->g->rows; v[n++] = A.frame.w; v[n++] = A.frame.h;
+  v[n++] = s->gap; v[n++] = s->status;
   h = mix_in(h, v, (size_t)n * sizeof(int));
   h = mix_in(h, s->t, sizeof(Theme));
   h = mix_str(h, s->title);
   h = mix_str(h, s->edit);
   h = mix_str(h, s->pill);
   h = mix_str(h, s->find);
+  h = mix_str(h, s->status_text);
+  h = mix_str(h, s->status_size);
+  h = mix_str(h, s->status_time);
   for (i = 0; i < s->ntabs; i++) {
     h = mix_str(h, s->tab_title[i]);
     h = mix_in(h, &s->tab_news[i], 1);
@@ -2522,7 +2643,8 @@ const Frame *app_render (void) {
     /* what floats over the rows (menu, find box, pill, scrollbar) is not
     ** drawn again with them: while it shows, the whole frame is */
     if ((s->menu != NULL && s->menu->open) || s->find != NULL || s->pill != NULL ||
-        (s->bar_alpha > 0 && s->g->sb_len > 0 && !s->g->alt))
+        (s->bar_alpha > 0 && s->g->sb_len > 0 && !s->g->alt) ||
+        (s->t->look & LOOK_CRT))	/* the glow and the dark corners span rows */
       full = 1;
     for (i = 0; i < CUR->npanes && !full; i++) full = CUR->panes[i]->g->all_dirty;
     if (full) draw_scene(&A.frame, &A.scene);
@@ -2629,8 +2751,8 @@ int app_init (const AppArgs *args, const char *argv0) {
     return -1;
   }
   A.scale = win_scale();
+  theme_apply(&A.theme, theme_find(A.cfg.theme), &A.cfg);	/* the look sets sizes */
   apply_font();
-  theme_apply(&A.theme, theme_find(A.cfg.theme), &A.cfg);
   A.tabs[0] = tab_new(pane_make(A.cfg.cols, A.cfg.rows));
   A.ntabs = 1;
   A.cols = A.cfg.cols;

@@ -690,7 +690,7 @@ static void draw_cursor (Frame *f, const Scene *s) {
 void draw_scrollbar_rect (const Frame *f, const Scene *s, int *x, int *y,
                           int *w, int *h) {
   const Grid *g = s->g;
-  int track_y = s->head + s->bar + s->strip + 4, track_h = f->h - track_y - 4;
+  int track_y = s->head + s->bar + s->strip + 4, track_h = f->h - s->status - track_y - 4;
   int total = g->rows + g->sb_len;
   int th = (int)((long)track_h * g->rows / (total > 0 ? total : 1));
   if (th < 28) th = 28;
@@ -928,21 +928,58 @@ static void draw_text_fit (Frame *f, int x, int y, const char *utf8, int room,
 }
 
 
+/*
+** The tab styles share the places of draw_tab_rect (the mouse finds the
+** tabs there): classic tabs run down into the text, pills float, flat
+** tabs are squares with an accent line on top, line tabs are only text
+** with an accent line under the active one.
+*/
 static void draw_tabs (Frame *f, const Scene *s) {
   const Theme *t = s->t;
+  int style = t->look & LOOK_TABS;
   uint32_t dim = mix(t->ui, t->ui_text, s->focused ? 150 : 110);
-  int i, x, y, w, h;
+  int i, x, y, w, h, thick = s->ch / 9 > 2 ? s->ch / 9 : 2;
   fill(f, 0, s->head, f->w, s->bar, t->ui);
   for (i = 0; i < s->ntabs; i++) {
     int active = (i == s->cur_tab), hot = (i == s->hot_tab);
     int r, cx, cy, cw, chh, line;
-    uint32_t bg = active ? t->bg : t->ui;
+    uint32_t bg = t->ui;
     uint32_t fg = active ? t->fg : hot ? t->ui_text : dim;
     draw_tab_rect(f, s, i, &x, &y, &w, &h);
     if (w < 4) continue;
     r = h / 4;
-    /* the active tab runs down into the terminal: the same color joins them */
-    if (active) fill_round(f, x, y, w, h + r, r, t->bg, 255);
+    if (style == LOOK_PILL) {
+      int ph = s->ch + s->ch / 2, py;
+      if (ph > h - 2) ph = h - 2;
+      py = y + (h - ph) / 2;
+      if (active) {
+        bg = mix(t->ui, t->accent1, t->dark ? 55 : 40);
+        fill_round(f, x, py, w, ph, ph / 2, mix(t->ui, t->accent1, 150), 255);
+        fill_round(f, x + 1, py + 1, w - 2, ph - 2, (ph - 2) / 2, bg, 255);
+        fg = t->ui_text;
+      }
+      else if (hot) fill_round(f, x, py, w, ph, ph / 2, t->accent1, 35);
+    }
+    else if (style == LOOK_FLAT) {
+      if (active) {
+        bg = t->bg;
+        fill(f, x, s->head, w, s->bar, t->bg);
+        fill(f, x, s->head, w, thick, t->accent1);
+      }
+      else if (hot) fill_alpha(f, x, s->head, w, s->bar, t->accent1, 30);
+    }
+    else if (style == LOOK_LINE) {
+      if (active) {
+        fg = t->ui_text;
+        fill_round(f, x + s->cw, s->head + s->bar - thick - 1, w - 2 * s->cw, thick,
+                   thick / 2, t->accent1, 255);
+      }
+    }
+    /* classic: the active tab runs down into the terminal, the same color joins them */
+    else if (active) {
+      bg = t->bg;
+      fill_round(f, x, y, w, h + r, r, t->bg, 255);
+    }
     else if (hot) fill_round(f, x, y, w, h - 2, r, t->accent1, 40);
     draw_tab_close_rect(f, s, i, &cx, &cy, &cw, &chh);
     if (active && s->edit != NULL) {	/* being renamed: the end of the text, a cursor */
@@ -977,6 +1014,166 @@ static void draw_tabs (Frame *f, const Scene *s) {
     uint32_t c = s->hot_tab == s->ntabs ? t->ui_text : dim;
     fill(f, x + (w - len) / 2, y + (h - line) / 2, len, line, c);
     fill(f, x + (w - line) / 2, y + (h - len) / 2, line, len, c);
+  }
+}
+
+/* }================================================================== */
+
+
+/*
+** {==================================================================
+** The look: panes as cards, the status bar, the old screen
+** ===================================================================
+*/
+
+/* LOOK_CARDS: what is around the cards, a little darker than the text */
+static uint32_t card_ground (const Theme *t) {
+  return t->dark ? mix(t->bg, 0x000000, 110) : mix(t->bg, t->fg, 24);
+}
+
+
+/* the card of pane i (all of the text part when the tab is not split):
+** it reaches out to the window's gap where the pane touches an edge,
+** and into half of the line between panes elsewhere */
+static void card_rect (const Frame *f, const Scene *s, int i, int *x, int *y,
+                       int *w, int *h) {
+  int top = s->head + s->bar + s->strip, bottom = f->h - s->status;
+  int seam = s->cw / 4 > 2 ? s->cw / 4 : 2;	/* the ground seen between two cards */
+  int x0, y0, x1, y1, ex = (s->cw - seam) / 2, ey = (s->ch - seam) / 2;
+  if (s->npanes < 2) {
+    x0 = s->gap; y0 = top + s->gap;
+    x1 = f->w - s->gap; y1 = bottom - s->gap;
+  }
+  else {
+    int px = s->pane[i].x, py = s->pane[i].y, pw = s->pane[i].w, ph = s->pane[i].h;
+    x0 = (px - s->cw < s->pad) ? s->gap : px - ex;
+    x1 = (px + pw + s->cw > f->w - s->pad) ? f->w - s->gap : px + pw + ex;
+    y0 = (py - s->ch < top + s->pad) ? top + s->gap : py - ey;
+    y1 = (py + ph + s->ch > bottom - s->pad) ? bottom - s->gap : py + ph + ey;
+  }
+  *x = x0; *y = y0; *w = x1 - x0; *h = y1 - y0;
+}
+
+
+/* a card with a thin edge (it shows even on a black ground); the
+** focused one of a split tab gets an edge of the accent color */
+static void draw_card (Frame *f, const Scene *s, int i, uint32_t bg) {
+  const Theme *t = s->t;
+  int x, y, w, h, r = s->pad - s->gap;
+  uint32_t edge = (s->npanes > 1 && s->pane[i].focused && s->focused)
+                    ? mix(bg, t->accent1, 150) : mix(bg, t->fg, t->dark ? 34 : 46);
+  card_rect(f, s, i, &x, &y, &w, &h);
+  if (r > s->ch / 2) r = s->ch / 2;
+  if (r < 2) r = 2;
+  fill_round(f, x, y, w, h, r, edge, 255);
+  fill_round(f, x + 1, y + 1, w - 2, h - 2, r - 1, bg, 255);
+}
+
+
+/* a powerline arrow, aw wide, filling the height h, pointing right or left */
+static void draw_arrow (Frame *f, int x, int y, int aw, int h, uint32_t c, int right) {
+  int j;
+  for (j = 0; j < h; j++) {
+    double d = ((double)j + 0.5 - (double)h / 2.0) / ((double)h / 2.0);
+    double len = (double)aw * (1.0 - (d < 0 ? -d : d));
+    int n = (int)len, a = (int)((len - (double)n) * 255.0);
+    if (right) {
+      fill(f, x, y + j, n, 1, c);
+      fill_alpha(f, x + n, y + j, 1, 1, c, a);
+    }
+    else {
+      fill(f, x + aw - n, y + j, n, 1, c);
+      fill_alpha(f, x + aw - n - 1, y + j, 1, 1, c, a);
+    }
+  }
+}
+
+
+/* the text color that reads best on c: the theme's background or text */
+static uint32_t text_on (const Theme *t, uint32_t c) {
+  return theme_contrast(t->bg, c) >= theme_contrast(t->fg, c) ? t->bg : t->fg;
+}
+
+
+/* LOOK_STATUS: [>_ mmc-term][title] ... [cols x rows][time] */
+static void draw_status (Frame *f, const Scene *s) {
+  static const char app[] = " \xef\x84\xa0 " TERM_NAME " ";	/* U+F120 a prompt */
+  const Theme *t = s->t;
+  int h = s->status, y = f->h - h, aw = h / 2, x, tw, room;
+  int ty = y + (h - s->ch) / 2;
+  uint32_t c1 = t->accent1, c2 = t->sel_bg, c3 = t->accent2;
+  char title[160];
+  fill(f, 0, y, f->w, h, t->ui);
+  /* from the right: the time, then the size */
+  x = f->w;
+  tw = draw_text_width(s->status_time) + s->cw;
+  x -= tw;
+  fill(f, x, y, tw, h, c1);
+  draw_text(f, x + s->cw / 2, ty, s->status_time, text_on(t, c1), c1, 0);
+  tw = draw_text_width(s->status_size) + 2 * s->cw;
+  fill(f, x - aw - tw, y, tw + aw, h, c3);
+  draw_arrow(f, x - aw, y, aw, h, c1, 0);
+  x -= aw + tw;
+  draw_text(f, x + s->cw, ty, s->status_size, text_on(t, c3), c3, 0);
+  draw_arrow(f, x - aw, y, aw, h, c3, 0);
+  room = x - aw;	/* the left part ends before it */
+  /* from the left: the program, then the title */
+  tw = draw_text_width(app);
+  fill(f, 0, y, tw, h, c1);
+  draw_text(f, 0, ty, app, text_on(t, c1), c1, 0);
+  x = tw;
+  snprintf(title, sizeof(title), " %s ", s->status_text ? s->status_text : "");
+  tw = draw_text_width(title);
+  if (tw > room - x - 2 * aw) tw = room - x - 2 * aw;
+  if (tw <= s->cw) {
+    draw_arrow(f, x, y, aw, h, c1, 1);
+    return;
+  }
+  fill(f, x, y, tw + aw, h, c2);
+  draw_arrow(f, x, y, aw, h, c1, 1);
+  draw_text_fit(f, x + aw, ty, title, tw, t->fg, c2);
+  draw_arrow(f, x + aw + tw, y, aw, h, c2, 1);
+}
+
+
+/*
+** LOOK_CRT, over rows y0 .. y1 of the frame: the text glows a little
+** (a blur laid over it, only where that is lighter), every third row of
+** pixels is darker, and so are the corners.
+*/
+static void draw_crt (Frame *f, int y0, int y1) {
+  static uint32_t *row = NULL;
+  static int nrow = 0;
+  int x, y, w = f->w, h = y1 - y0;
+  if (w <= 0 || h <= 0) return;
+  if (nrow < w) {
+    free(row);
+    row = (uint32_t *)xmalloc((size_t)w * sizeof(uint32_t));
+    nrow = w;
+  }
+  for (y = y0; y < y1; y++) {
+    uint32_t *p = f->px + (size_t)y * (size_t)w;
+    long ny = ((long)(y - y0) * 2 - h) * 256 / h;	/* -256 .. 256 */
+    int line = ((y - y0) % 3 == 2);
+    memcpy(row, p, (size_t)w * sizeof(uint32_t));
+    for (x = 0; x < w; x++) {
+      uint32_t a = row[x > 1 ? x - 2 : 0], b = row[x > 0 ? x - 1 : 0], c = row[x];
+      uint32_t d = row[x + 1 < w ? x + 1 : w - 1], e = row[x + 2 < w ? x + 2 : w - 1];
+      long nx = ((long)x * 2 - w) * 256 / w, d2 = (nx * nx + ny * ny) / 256;
+      long k = 256 - ((d2 * d2) >> 12) * 90 / 64, out = 0;
+      int sh;
+      if (line) k = k * 190 / 256;
+      if (k < 0) k = 0;
+      for (sh = 16; sh >= 0; sh -= 8) {
+        long v = (long)((c >> sh) & 0xFF);
+        long glow = ((long)((a >> sh) & 0xFF) + 2 * (long)((b >> sh) & 0xFF) + 3 * v +
+                     2 * (long)((d >> sh) & 0xFF) + (long)((e >> sh) & 0xFF)) * 3 / 36;
+        if (glow > v) v = glow;
+        v = v * k / 256;
+        out |= (v > 255 ? 255 : v) << sh;
+      }
+      p[x] = (uint32_t)out;
+    }
   }
 }
 
@@ -1117,7 +1314,9 @@ static void draw_terminal (Frame *f, const Scene *s, int partial, int x0, int x1
 
 int draw_scene_rows (Frame *f, const Scene *s) {
   int y0 = f->h, y1 = 0, i;
-  if (s->npanes < 2) draw_terminal(f, s, 1, 0, f->w, &y0, &y1);
+  if (s->npanes < 2 && (s->t->look & LOOK_CARDS))	/* inside the card's edge */
+    draw_terminal(f, s, 1, s->gap + 1, f->w - s->gap - 1, &y0, &y1);
+  else if (s->npanes < 2) draw_terminal(f, s, 1, 0, f->w, &y0, &y1);
   else {
     for (i = 0; i < s->npanes; i++) {
       Scene ps = *s;
@@ -1151,6 +1350,13 @@ void draw_scene (Frame *f, const Scene *s) {
   }
   f->dy = 0;
   f->dh = f->h;
+  if (t->look & LOOK_CARDS) {
+    int top = s->head + s->bar + s->strip;
+    fill(f, 0, top, f->w, f->h - top - s->status, card_ground(t));
+    if (s->npanes < 2) draw_card(f, s, 0, t->bg);
+    else
+      for (i = 0; i < s->npanes; i++) draw_card(f, s, i, s->pane[i].t->bg);
+  }
   if (s->npanes < 2) draw_terminal(f, s, 0, 0, 0, NULL, NULL);
   else {
     for (i = 0; i < s->npanes; i++) {	/* each with its own colors; only one has the focus */
@@ -1163,16 +1369,19 @@ void draw_scene (Frame *f, const Scene *s) {
         ps.has_sel = ps.has_hot = 0;
         ps.focused = 0;	/* a hollow cursor */
       }
-      if (ps.t->bg != t->bg) fill(f, ps.ox, ps.oy, s->pane[i].w, s->pane[i].h, ps.t->bg);
+      if (ps.t->bg != t->bg && !(t->look & LOOK_CARDS))
+        fill(f, ps.ox, ps.oy, s->pane[i].w, s->pane[i].h, ps.t->bg);
       draw_terminal(f, &ps, 0, 0, 0, NULL, NULL);
     }
-    for (i = 0; i < s->ndivs; i++) {	/* a thin line in the middle of the gap */
+    for (i = 0; i < s->ndivs && !(t->look & LOOK_CARDS); i++) {	/* a thin line in the middle of the gap */
       const int *d = s->div[i];
       uint32_t c = mix(t->bg, t->fg, 70);
       if (d[2] >= d[3]) fill(f, d[0], d[1] + d[3] / 2, d[2], 1, c);
       else fill(f, d[0] + d[2] / 2, d[1], 1, d[3], c);
     }
   }
+  if (s->status > 0) draw_status(f, s);
+  if (t->look & LOOK_CRT) draw_crt(f, s->head, f->h);
   if (s->bar_alpha > 0 && g->sb_len > 0 && !g->alt) {
     int bx, by, bw, bh;
     draw_scrollbar_rect(f, s, &bx, &by, &bw, &bh);
