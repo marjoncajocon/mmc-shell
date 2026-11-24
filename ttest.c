@@ -393,7 +393,11 @@ static void test_contrast (void) {
   check_str("unknown theme is dark", theme_find("nope")->name, "dark");
   check_str("gruv is gruvbox", theme_find("gruv")->name, "gruvbox");
   check_str("dark -> green", theme_next("dark")->name, "green");
-  check_str("light -> dark (round)", theme_next("light")->name, "dark");
+  check_str("light -> abyss", theme_next("light")->name, "abyss");
+  check_str("mint -> dark (round)", theme_next("mint")->name, "dark");
+  check_str("midnight is dark", theme_find("midnight")->name, "dark");
+  check_str("Neon Drive by title", theme_find("Neon Drive")->name, "neon");
+  check_int("24 themes", theme_at(23) != NULL && theme_at(24) == NULL, 1);
 }
 
 

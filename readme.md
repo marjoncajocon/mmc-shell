@@ -109,7 +109,7 @@ Android has no `/tmp`). mmc-term needs X11 or Cocoa, so Android gets the shell.
 | `mterm.c` | `main` of mmc-term, command line |
 | `tgrid.c` | screen model: cells, cursor, scroll region, alternate screen, scrollback |
 | `tvt.c` | escape sequence (VT / xterm) parser |
-| `ttheme.c` | the themes (dark, green, gruvbox, red, light), `mmcterm.conf` |
+| `ttheme.c` | the 24 themes (dark, green, gruvbox, red, light, abyss ... mint), `mmcterm.conf` |
 | `tfont.c` | finds fonts, rasterizes and caches glyphs (uses `stb_truetype.h`) |
 | `tshape.c` | what stb_truetype does not read: ligatures (GSUB), color emoji (COLR, CBDT, sbix), PNG |
 | `tdraw.c` | software renderer: text, box drawing, cursor, selection, scrollbar, menu |
@@ -165,7 +165,7 @@ git-bash is bash inside the *mintty* window. mmc has its own window too:
 mmc-term                     the mmc shell, in the current folder
 mmc-term -e nvim notes.txt   another program instead of the shell
 mmc-term --hold -e ...       keep the window when the program ends
-mmc-term --theme gruvbox     dark, green, gruvbox, red or light, for this window only
+mmc-term --theme gruvbox     any theme name (list below), for this window only
 mmc-term --font-size 11      text size in points, for this window only
 mmc-term --render-test a.bmp draw a sample into an image, no window
 ```
@@ -184,11 +184,17 @@ mmc-term --render-test a.bmp draw a sample into an image, no window
 | drag the line between panes | give one pane more room |
 | Ctrl+Tab / Ctrl+Shift+Tab | next / previous tab (also: click a tab, or the wheel over the tabs) |
 | drag a tab along the bar | put it in another place |
-| Ctrl+Shift+L | next theme: dark (default), green, gruvbox, red, light (remembered; the right-click menu lists them all) |
+| Ctrl+Shift+L | next theme (remembered; right-click > Choose theme... lists them all) |
 | Ctrl+Shift+wheel | see-through window: opacity 30 .. 100 % in steps of 5 (remembered; also in the menu) |
 | F11 or Alt+Enter | full screen |
 | Ctrl+Shift+N | new window |
 | right click (anywhere, title bar too) | menu |
+
+**Themes.** 24 built in, `theme=` in `etc/mmcterm.conf` or `--theme`:
+dark (default), green, gruvbox, red, light, abyss, aurora, ember, sakura,
+phosphor, amber, fjord, neon, moss, graphite, void, mocha, dune, volt and the
+light ones daylight, paper, lagoon, lavender, mint. Ctrl+Shift+L goes through
+them in this order; right click > *Choose theme...* lists them all.
 
 **Tabs.** Every tab is its own shell, started in the folder of the tab you
 are in. The tab bar shows up with the second tab — the window grows by its

@@ -17,7 +17,7 @@
 enum { M_COPY = 1, M_PASTE, M_SELECT_ALL, M_BIGGER, M_SMALLER,
        M_MORE_CLEAR, M_LESS_CLEAR, M_NEW_TAB, M_RENAME_TAB, M_CLOSE_TAB,
        M_NEW_WINDOW, M_ABOUT, M_FIND, M_SPLIT_RIGHT, M_SPLIT_DOWN, M_CLOSE_PANE,
-       M_BLINK,
+       M_BLINK, M_THEMES,
        M_THEME /* + theme number, keep last */ };
 
 /* one shell with its own screen: a tab has one, or several side by side */
@@ -497,11 +497,39 @@ static void menu_add (const char *label, const char *hint, int id) {
 }
 
 
-static void menu_open (int x, int y) {
-  static char titles[8][40];
+/* lays out the entries added so far and shows them at x, y */
+static void menu_show (int x, int y) {
   Menu *m = &A.menu;
-  const Theme *cur = theme_find(A.cfg.theme), *next = theme_next(A.cfg.theme), *t;
+  menu_layout(m, font_cell_w(), font_cell_h(), A.win_h - 8);
+  m->x = (x + m->w + 8 > A.win_w) ? A.win_w - m->w - 8 : x;
+  m->y = (y + m->h + 8 > A.win_h) ? A.win_h - m->h - 8 : y;
+  if (m->x < 4) m->x = 4;
+  if (m->y < 4) m->y = 4;
+  m->hot = -1;
+  m->open = 1;
+  touch();
+}
+
+
+/* every theme, the current one ticked: too many for the main menu */
+static void menu_themes (int x, int y) {
+  static char titles[MENU_MAX][40];
+  const Theme *cur = theme_find(A.cfg.theme), *t;
   int i;
+  memset(&A.menu, 0, sizeof(A.menu));
+  for (i = 0; i < MENU_MAX && (t = theme_at(i)) != NULL; i++) {
+    sprintf(titles[i], "%.20s%s", t->title,
+            t->dark || m_stricmp(t->title, "Light") == 0 ? "" : " (light)");
+    menu_add(titles[i], t == cur ? "\xE2\x9C\x93" : NULL, M_THEME + i);
+  }
+  menu_show(x, y);
+}
+
+
+static void menu_open (int x, int y) {
+  static char title[48];
+  Menu *m = &A.menu;
+  const Theme *next = theme_next(A.cfg.theme);
   memset(m, 0, sizeof(*m));
   menu_add("Copy", "Ctrl+Shift+C", M_COPY);
   menu_add("Paste", "Ctrl+Shift+V", M_PASTE);
@@ -516,11 +544,9 @@ static void menu_open (int x, int y) {
   menu_add("Close tab", CUR->npanes > 1 ? NULL : "Ctrl+Shift+W", M_CLOSE_TAB);
   menu_add("New window", "Ctrl+Shift+N", M_NEW_WINDOW);
   menu_add(NULL, NULL, 0);
-  for (i = 0; i < 8 && (t = theme_at(i)) != NULL; i++) {	/* the current one ticked */
-    sprintf(titles[i], "%.20s theme", t->title);
-    menu_add(titles[i], t == cur ? "\xE2\x9C\x93" : t == next ? "Ctrl+Shift+L" : NULL,
-             M_THEME + i);
-  }
+  sprintf(title, "Next theme: %.20s", next->title);
+  menu_add(title, "Ctrl+Shift+L", M_THEME + (int)(next - theme_at(0)));
+  menu_add("Choose theme...", theme_find(A.cfg.theme)->title, M_THEMES);
   menu_add(NULL, NULL, 0);
   menu_add("Bigger text", "Ctrl +", M_BIGGER);
   menu_add("Smaller text", "Ctrl -", M_SMALLER);
@@ -529,14 +555,7 @@ static void menu_open (int x, int y) {
   menu_add("Blinking cursor", A.cfg.cursor_blink ? "\xE2\x9C\x93" : NULL, M_BLINK);
   menu_add(NULL, NULL, 0);
   menu_add("About " TERM_NAME, NULL, M_ABOUT);
-  menu_layout(m, font_cell_w(), font_cell_h(), A.win_h - 8);
-  m->x = (x + m->w + 8 > A.win_w) ? A.win_w - m->w - 8 : x;
-  m->y = (y + m->h + 8 > A.win_h) ? A.win_h - m->h - 8 : y;
-  if (m->x < 4) m->x = 4;
-  if (m->y < 4) m->y = 4;
-  m->hot = -1;
-  m->open = 1;
-  touch();
+  menu_show(x, y);
 }
 
 
@@ -571,6 +590,7 @@ static void menu_do (int id) {
     case M_SPLIT_DOWN: split_pane(0); break;
     case M_CLOSE_PANE: close_pane(CP); break;
     case M_BLINK: toggle_blink(); break;
+    case M_THEMES: menu_themes(A.menu.x, A.menu.y); break;
     default:
       if (id >= M_THEME && theme_at(id - M_THEME) != NULL)
         set_theme(theme_at(id - M_THEME)->name, 1);
