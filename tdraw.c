@@ -870,25 +870,34 @@ static void draw_header (Frame *f, const Scene *s) {
 ** ===================================================================
 */
 
-/* tab i, or the + button when i == ntabs; tabs share the width equally */
+/* tab i, or the + button when i == ntabs: compact, each tab as wide as
+** its title and the x (6 .. 26 cells), from the left edge of the window,
+** one right after the other, the + after the last one; they shrink to
+** share the width when they do not fit */
 void draw_tab_rect (const Frame *f, const Scene *s, int i, int *x, int *y,
                     int *w, int *h) {
-  int side = s->bar / 3, gap = s->bar / 8 + 1, top = s->bar / 5;
+  int top = s->bar / 5;
   int plus = s->bar - top - 6;
-  int room = f->w - 2 * side - plus - gap;
-  int tw = room / (s->ntabs > 0 ? s->ntabs : 1);
-  if (tw > 26 * s->cw) tw = 26 * s->cw;
+  int room = f->w - plus;
+  int most = room / (s->ntabs > 0 ? s->ntabs : 1), k, tx = 0;
+  if (most > 26 * s->cw) most = 26 * s->cw;
   *y = s->head + top;
   *h = s->bar - top;
-  if (i < s->ntabs) {
-    *x = side + i * tw;
-    *w = tw - gap;
+  for (k = 0; k < s->ntabs; k++) {	/* a cell, the text, half a cell, the x */
+    int tw = s->cw + draw_text_width(s->tab_title[k] ? s->tab_title[k] : "") +
+             s->cw / 2 + *h * 3 / 4;
+    if (tw < 6 * s->cw) tw = 6 * s->cw;
+    if (tw > most) tw = most;
+    if (k == i) {
+      *x = tx;
+      *w = tw;
+      return;
+    }
+    tx += tw;
   }
-  else {
-    *x = side + s->ntabs * tw;
-    *y += (*h - plus) / 2;
-    *w = *h = plus;
-  }
+  *x = tx;
+  *y += (*h - plus) / 2;
+  *w = *h = plus;
 }
 
 
