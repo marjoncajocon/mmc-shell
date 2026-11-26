@@ -213,6 +213,7 @@ typedef struct Theme {
 
 typedef struct Config {
   char theme[32];
+  char prompt[16];	/* the shell's prompt: parrot, powerline, classic; "" its own */
   char font[128];
   char font_file[512];
   char shell[512];

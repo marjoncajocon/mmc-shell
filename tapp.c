@@ -20,7 +20,8 @@ enum { M_COPY = 1, M_PASTE, M_SELECT_ALL, M_BIGGER, M_SMALLER,
        M_NEW_WINDOW, M_ABOUT, M_FIND, M_SPLIT_RIGHT, M_SPLIT_DOWN, M_CLOSE_PANE,
        M_BLINK, M_THEMES, M_LOOK, M_CARDS, M_STATUSBAR, M_CRT, M_LOOK_THEME,
        M_TABS,	/* + LOOK_CLASSIC .. LOOK_LINE */
-       M_THEME = M_TABS + 4 /* + theme number, keep last */ };
+       M_PROMPT = M_TABS + 4,	/* + the number in prompt_names */
+       M_THEME = M_PROMPT + 3 /* + theme number, keep last */ };
 
 /* one shell with its own screen: a tab has one, or several side by side */
 typedef struct Pane {
@@ -374,9 +375,18 @@ static void set_theme (const char *name, int save) {
 
 static const char *const tab_style_names[4] = {"classic", "pill", "flat", "line"};
 
+/* the prompt styles of the mmc shell ($MMC_PROMPT): it reads prompt= of
+** mmcterm.conf at every prompt, so a change shows at the next one */
+static const char *const prompt_names[3] = {"parrot", "powerline", "classic"};
+
 /* a setting of the look from the menu: kept in mmcterm.conf, then drawn */
 static void set_look (int id) {
   int look = A.theme.look;
+  if (id >= M_PROMPT && id < M_PROMPT + 3) {
+    strcpy(A.cfg.prompt, prompt_names[id - M_PROMPT]);
+    config_set_key(A.conf, "prompt", A.cfg.prompt);
+    return;
+  }
   if (id >= M_TABS && id < M_TABS + 4) {
     A.cfg.tabs = id - M_TABS;
     config_set_key(A.conf, "tabs", tab_style_names[A.cfg.tabs]);
@@ -598,6 +608,7 @@ static void menu_themes (int x, int y) {
 /* the tab style and the extras, ticked as they are now */
 static void menu_look (int x, int y) {
   static const char *const titles[4] = {"Classic tabs", "Pill tabs", "Flat tabs", "Line tabs"};
+  static const char *const prompts[3] = {"Box prompt", "Powerline prompt", "One-line prompt"};
   int look = A.theme.look, i;
   memset(&A.menu, 0, sizeof(A.menu));
   for (i = 0; i < 4; i++)
@@ -606,6 +617,11 @@ static void menu_look (int x, int y) {
   menu_add("Floating panes", (look & LOOK_CARDS) ? "\xE2\x9C\x93" : NULL, M_CARDS);
   menu_add("Status bar", (look & LOOK_STATUS) ? "\xE2\x9C\x93" : NULL, M_STATUSBAR);
   menu_add("CRT screen", (look & LOOK_CRT) ? "\xE2\x9C\x93" : NULL, M_CRT);
+  menu_add(NULL, NULL, 0);
+  for (i = 0; i < 3; i++) {	/* none set: the shell's own, parrot */
+    int on = A.cfg.prompt[0] ? strcmp(A.cfg.prompt, prompt_names[i]) == 0 : i == 0;
+    menu_add(prompts[i], on ? "\xE2\x9C\x93" : NULL, M_PROMPT + i);
+  }
   menu_add(NULL, NULL, 0);
   menu_add("As the theme has it", NULL, M_LOOK_THEME);
   menu_show(x, y);
@@ -633,7 +649,7 @@ static void menu_open (int x, int y) {
   sprintf(title, "Next theme: %.20s", next->title);
   menu_add(title, "Ctrl+Shift+L", M_THEME + (int)(next - theme_at(0)));
   menu_add("Choose theme...", theme_find(A.cfg.theme)->title, M_THEMES);
-  menu_add("Look...", "tabs, panes, bars", M_LOOK);
+  menu_add("Look...", "tabs, panes, prompt", M_LOOK);
   menu_add(NULL, NULL, 0);
   menu_add("Bigger text", "Ctrl +", M_BIGGER);
   menu_add("Smaller text", "Ctrl -", M_SMALLER);
@@ -684,7 +700,7 @@ static void menu_do (int id) {
       menu_look(A.menu.x, A.menu.y);	/* open again: one may want more */
       break;
     default:
-      if (id >= M_TABS && id < M_TABS + 4) {
+      if (id >= M_TABS && id < M_PROMPT + 3) {
         set_look(id);
         menu_look(A.menu.x, A.menu.y);
       }

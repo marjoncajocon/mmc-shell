@@ -483,6 +483,24 @@ static void test_look (void) {
   c.crt = 1;
   theme_apply(&th, theme_find("aurora"), &c);
   check_int("settings win over the theme", th.look, LOOK_PILL | LOOK_STATUS | LOOK_CRT);
+  /* the prompt style is only passed on to the shell */
+  config_defaults(&c);
+  check_str("no prompt set: the shell's own", c.prompt, "");
+  {
+    FILE *fp = fopen("ttest-prompt.conf", "w");
+    if (fp != NULL) {
+      fputs("tabs=line\n  prompt = powerline   # the segments\n", fp);
+      fclose(fp);
+    }
+    config_load(&c, "ttest-prompt.conf");
+    check_str("prompt= is read", c.prompt, "powerline");
+    config_set_key("ttest-prompt.conf", "prompt", "classic");
+    config_defaults(&c);
+    config_load(&c, "ttest-prompt.conf");
+    check_str("prompt= is changed in place", c.prompt, "classic");
+    check_int("the other settings are kept", c.tabs, LOOK_LINE);
+    remove("ttest-prompt.conf");
+  }
   /* a card with a status bar under it */
   config_defaults(&c);
   c.status = 1;

@@ -450,6 +450,8 @@ static const char *const default_config =
   "#panes=theme              # theme, plain or cards (floating, round corners)\n"
   "#statusbar=theme          # theme, yes or no (a powerline bar at the bottom)\n"
   "#crt=theme                # theme, yes or no (scanlines of an old screen)\n"
+  "#prompt=parrot            # the mmc prompt: parrot (box lines), powerline or\n"
+  "                          # classic (one line); $MMC_PROMPT wins over it\n"
   "copy_on_select=yes\n"
   "#shell=mmc                # program to start\n"
   "\n"
@@ -552,6 +554,7 @@ static void config_set (Config *c, const char *key, const char *v) {
   else if (strcmp(key, "panes") == 0) c->cards = parse_look(v);
   else if (strcmp(key, "statusbar") == 0) c->status = parse_look(v);
   else if (strcmp(key, "crt") == 0) c->crt = parse_look(v);
+  else if (strcmp(key, "prompt") == 0) copy_text(c->prompt, sizeof(c->prompt), v);
   else if (strcmp(key, "copy_on_select") == 0)
     c->copy_on_select = parse_bool(v);
   else if (strcmp(key, "cursor") == 0)

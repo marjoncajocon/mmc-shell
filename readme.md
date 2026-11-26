@@ -207,6 +207,7 @@ them in this order; right click > *Choose theme...* lists them all.
 | `panes=plain\|cards` | cards: the text floats on a round card over a darker ground; split panes are separate cards, the focused one with an accent edge |
 | `statusbar=yes\|no` | a powerline bar at the bottom: the title, the size of the pane, the time (the window grows by it, the rows stay) |
 | `crt=yes\|no` | an old screen: scanlines, a soft glow on the text and darker corners (the whole window is drawn each time, a little slower) |
+| `prompt=parrot\|powerline\|classic` | the prompt of the mmc shells in the window: box lines (the default), colored segments with arrows, or one line like git-bash. Not part of a theme; the shells read it at every prompt, so a change shows in all tabs at the next Enter (`MMC_PROMPT` wins over it) |
 
 **Tabs.** Every tab is its own shell, started in the folder of the tab you
 are in. The tab bar shows up with the second tab — the window grows by its
@@ -401,7 +402,9 @@ lines, and a red `[✗]` after a command that failed:
 `classic` is the one line git-bash style prompt, `powerline` draws colored
 segments with arrows and the git branch icon (it needs a Nerd Font, like the JetBrains Mono one,
 which mmc-term has), and `ps1` uses your own `$PS1` with bash's `\u \h \w \$`
-escapes. A continued command line shows `$PS2` (`> `).
+escapes. A continued command line shows `$PS2` (`> `). Without `MMC_PROMPT`,
+the shells in mmc-term use the prompt chosen in right click > *Look...*
+(`prompt=` in `etc/mmcterm.conf`).
 
 **Banner.** An interactive shell greets with `MMC` in big green letters and
 the name of the developer. A file `/etc/banner` replaces the big letters with

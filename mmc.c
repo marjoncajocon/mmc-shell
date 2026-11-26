@@ -407,9 +407,39 @@ static char *git_branch (const char *cwd) {
 
 #define LINE	"\033[0;94m"	/* the connector lines: the blue of the logo */
 
-/* MMC_PROMPT: parrot (default), classic, powerline, or ps1 (your $PS1) */
+/* in mmc-term: prompt= of etc/mmcterm.conf, read at every prompt, so
+** the window's Look menu changes all its shells at their next prompt */
+static const char *term_prompt (void) {
+  static char style[16];
+  char *etc, *file, *text, *p;
+  if (var_get("MMC_TERM") == NULL) return NULL;
+  etc = path_join(path_root(), "etc");
+  file = path_join(etc, "mmcterm.conf");
+  text = read_file(file, NULL);
+  style[0] = '\0';
+  for (p = text; p != NULL && *p != '\0'; p += strcspn(p, "\n"), p += (*p != '\0')) {
+    size_t n;
+    p += strspn(p, " \t");
+    if (strncmp(p, "prompt", 6) != 0) continue;
+    p += 6 + strspn(p + 6, " \t");
+    if (*p != '=') continue;
+    p += 1 + strspn(p + 1, " \t");
+    n = strcspn(p, " \t\r\n#");
+    if (n < sizeof(style)) {
+      memcpy(style, p, n);
+      style[n] = '\0';
+    }
+  }
+  free(text); free(file); free(etc);
+  return style[0] ? style : NULL;
+}
+
+
+/* MMC_PROMPT: parrot (default), classic, powerline, or ps1 (your $PS1);
+** without it, in mmc-term, the prompt chosen in the window's menu */
 static const char *prompt_style (void) {
   const char *style = var_get("MMC_PROMPT");
+  if (style == NULL) style = term_prompt();
   return style ? style : "parrot";
 }
 
