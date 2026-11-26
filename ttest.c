@@ -394,10 +394,14 @@ static void test_contrast (void) {
   check_str("gruv is gruvbox", theme_find("gruv")->name, "gruvbox");
   check_str("dark -> green", theme_next("dark")->name, "green");
   check_str("light -> abyss", theme_next("light")->name, "abyss");
-  check_str("mint -> dark (round)", theme_next("mint")->name, "dark");
+  check_str("volt -> tidepool", theme_next("volt")->name, "tidepool");
+  check_str("slate -> daylight", theme_next("slate")->name, "daylight");
+  check_str("mint -> cloud", theme_next("mint")->name, "cloud");
+  check_str("solar -> dark (round)", theme_next("solar")->name, "dark");
   check_str("midnight is dark", theme_find("midnight")->name, "dark");
   check_str("Neon Drive by title", theme_find("Neon Drive")->name, "neon");
-  check_int("24 themes", theme_at(23) != NULL && theme_at(24) == NULL, 1);
+  check_int("44 themes", theme_at(43) != NULL && theme_at(44) == NULL, 1);
+  check_int("menu holds every theme", MENU_MAX >= 44, 1);
 }
 
 

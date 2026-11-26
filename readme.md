@@ -109,7 +109,7 @@ Android has no `/tmp`). mmc-term needs X11 or Cocoa, so Android gets the shell.
 | `mterm.c` | `main` of mmc-term, command line |
 | `tgrid.c` | screen model: cells, cursor, scroll region, alternate screen, scrollback |
 | `tvt.c` | escape sequence (VT / xterm) parser |
-| `ttheme.c` | the 24 themes (dark, green, gruvbox, red, light, abyss ... mint), `mmcterm.conf` |
+| `ttheme.c` | the 44 themes (dark, green, gruvbox, red, light, abyss ... solar), `mmcterm.conf` |
 | `tfont.c` | finds fonts, rasterizes and caches glyphs (uses `stb_truetype.h`) |
 | `tshape.c` | what stb_truetype does not read: ligatures (GSUB), color emoji (COLR, CBDT, sbix), PNG |
 | `tdraw.c` | software renderer: text, box drawing, cursor, selection, scrollbar, menu |
@@ -190,10 +190,12 @@ mmc-term --render-test a.bmp draw a sample into an image, no window
 | Ctrl+Shift+N | new window |
 | right click (anywhere, title bar too) | menu |
 
-**Themes.** 24 built in, `theme=` in `etc/mmcterm.conf` or `--theme`:
+**Themes.** 44 built in, `theme=` in `etc/mmcterm.conf` or `--theme`:
 dark (default), green, gruvbox, red, light, abyss, aurora, ember, sakura,
-phosphor, amber, fjord, neon, moss, graphite, void, mocha, dune, volt and the
-light ones daylight, paper, lagoon, lavender, mint. Ctrl+Shift+L goes through
+phosphor, amber, fjord, neon, moss, graphite, void, mocha, dune, volt,
+tidepool, obsidian, dusk, glacier, matcha, rosewood, cobalt, nebula, copper,
+ink, oasis, cryo, vapor, slate and the light ones daylight, paper, lagoon,
+lavender, mint, cloud, oat, peach, sky, sage, solar. Ctrl+Shift+L goes through
 them in this order; right click > *Choose theme...* lists them all.
 
 **Look.** Every theme also brings a look, which right click > *Look...* or

@@ -4,7 +4,7 @@
 **   mmc-term                     the mmc shell in a window, in this folder
 **   mmc-term -e prog [args...]   run another program instead
 **   mmc-term --hold ...          keep the window when the program ends
-**   mmc-term --theme gruvbox     dark, green, gruvbox, red, light, abyss ... mint, just
+**   mmc-term --theme gruvbox     dark, green, gruvbox, red, light, abyss ... solar, just
 **                                for this window
 **   mmc-term --font-size 9       text size in points, just for this window
 */
@@ -21,8 +21,9 @@ static const char *const usage =
   "       [-e program [args...]]\n"
   "       " TERM_NAME " [--font-size N] --render-test out.bmp\n\n"
   "Themes: dark green gruvbox red light abyss aurora ember sakura phosphor\n"
-  "amber fjord neon moss graphite void mocha dune volt daylight paper lagoon\n"
-  "lavender mint.\n"
+  "amber fjord neon moss graphite void mocha dune volt tidepool obsidian dusk\n"
+  "glacier matcha rosewood cobalt nebula copper ink oasis cryo vapor slate\n"
+  "daylight paper lagoon lavender mint cloud oat peach sky sage solar.\n"
   "Settings: etc/mmcterm.conf in the mmc folder.\n"
   "Keys: Ctrl+Shift+C/V copy and paste, Ctrl+Shift+T/W new and close tab,\n"
   "Ctrl+Tab next tab, Ctrl+Shift+L next theme, Ctrl + and - zoom,\n"

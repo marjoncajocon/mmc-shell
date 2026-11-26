@@ -346,7 +346,7 @@ typedef struct Frame {
   int dy, dh;	/* the rows of pixels the last drawing changed */
 } Frame;
 
-#define MENU_MAX	40
+#define MENU_MAX	48	/* the theme menu lists every theme */
 #define TAB_MAX	32
 #define PANE_MAX	8	/* panes in one tab */
 
